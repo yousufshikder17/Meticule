@@ -1,0 +1,2 @@
+import { z } from "zod";
+export const OllamaResponseSchema=z.object({model:z.string(),message:z.object({role:z.string(),content:z.string().default(""),tool_calls:z.array(z.object({function:z.object({name:z.string(),arguments:z.record(z.string(),z.unknown())})})).optional()}),done:z.boolean(),done_reason:z.string().optional(),prompt_eval_count:z.number().int().nonnegative().optional(),eval_count:z.number().int().nonnegative().optional()});

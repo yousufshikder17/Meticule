@@ -1,0 +1,2 @@
+import type { ProviderFactory,ProviderConfiguration } from "../../provider-factory.js"; import { OllamaProvider } from "./ollama-provider.js";
+export class OllamaProviderFactory implements ProviderFactory {readonly type="ollama";create(c:ProviderConfiguration){if(!c.baseUrl)throw new Error("Ollama baseUrl is required");return new OllamaProvider({id:c.id,baseUrl:c.baseUrl.replace(/\/$/,""),allowedModels:c.allowedModels,modelCapabilities:c.modelCapabilities,defaultTimeoutMs:c.defaultTimeoutMs});}}

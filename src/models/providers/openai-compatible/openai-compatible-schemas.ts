@@ -1,0 +1,2 @@
+import { z } from "zod";
+export const OpenAICompatibleResponseSchema=z.object({id:z.string().optional(),choices:z.array(z.object({finish_reason:z.string().nullable(),message:z.object({content:z.string().nullable().optional(),tool_calls:z.array(z.object({id:z.string(),function:z.object({name:z.string(),arguments:z.string()})})).optional()})})).min(1),usage:z.object({prompt_tokens:z.number().int().nonnegative(),completion_tokens:z.number().int().nonnegative(),prompt_tokens_details:z.object({cached_tokens:z.number().int().nonnegative().optional()}).optional()}).optional()});
