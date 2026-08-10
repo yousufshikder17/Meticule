@@ -1,0 +1,45 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+          POSTGRES_DB: agent_platform
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agent -d agent_platform"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://agent:agent@localhost:5432/agent_platform
+      TEST_DATABASE_URL: postgres://agent:agent@localhost:5432/agent_platform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run db:migrate
+      - run: npm run db:check
+      - run: npm run build
+      - run: npm test
+      - run: npm audit --omit=dev
+      - run: npm pack --dry-run --json --ignore-scripts
+      - run: docker build -t durable-agent-platform:ci .
+      - name: Scan working tree and reachable history
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 dir /repo --no-banner --redact
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --no-banner --redact

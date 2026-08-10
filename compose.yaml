@@ -1,0 +1,150 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - agent_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1G }
+
+  migrate:
+    profiles: ["app"]
+    build: .
+    command: ["node", "dist/src/db/migrate.js"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://agent:agent@postgres:5432/agent_platform}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  api:
+    profiles: ["app"]
+    build: .
+    command: ["node", "dist/src/api/main.js"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://agent:agent@postgres:5432/agent_platform}
+      PORT: 3000
+      DB_POOL_MAX: ${API_DB_POOL_MAX:-20}
+      DB_POOL_IDLE_TIMEOUT_MS: ${DB_POOL_IDLE_TIMEOUT_MS:-30000}
+      DB_CONNECT_TIMEOUT_MS: ${DB_CONNECT_TIMEOUT_MS:-10000}
+      SHUTDOWN_GRACE_MS: ${SHUTDOWN_GRACE_MS:-30000}
+      AUTH_MODE: ${AUTH_MODE:-jwt}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_ISSUER: ${JWT_ISSUER:-durable-agent-platform}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-durable-agent-api}
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODELS: ${OLLAMA_MODELS:-}
+      OLLAMA_MODEL_CAPABILITIES_JSON: ${OLLAMA_MODEL_CAPABILITIES_JSON:-{}}
+      OPENAI_COMPAT_ENABLED: ${OPENAI_COMPAT_ENABLED:-false}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_MODELS: ${OPENAI_COMPAT_MODELS:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL_CAPABILITIES_JSON: ${OPENAI_COMPAT_MODEL_CAPABILITIES_JSON:-{}}
+      ANTHROPIC_ENABLED: ${ANTHROPIC_ENABLED:-false}
+      ANTHROPIC_MODELS: ${ANTHROPIC_MODELS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL_CAPABILITIES_JSON: ${ANTHROPIC_MODEL_CAPABILITIES_JSON:-{}}
+      GEMINI_ENABLED: ${GEMINI_ENABLED:-false}
+      GEMINI_MODELS: ${GEMINI_MODELS:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL_CAPABILITIES_JSON: ${GEMINI_MODEL_CAPABILITIES_JSON:-{}}
+      OLLAMA_EMBEDDING_BASE_URL: ${OLLAMA_EMBEDDING_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-}
+      OLLAMA_EMBEDDING_DIMENSIONS: ${OLLAMA_EMBEDDING_DIMENSIONS:-}
+      CONNECTOR_EGRESS_ALLOWLIST: ${CONNECTOR_EGRESS_ALLOWLIST:-}
+      CONNECTOR_ALLOW_PRIVATE_NETWORK: ${CONNECTOR_ALLOW_PRIVATE_NETWORK:-false}
+      CONNECTOR_TIMEOUT_MS: ${CONNECTOR_TIMEOUT_MS:-60000}
+      CONNECTOR_MAX_RESPONSE_BYTES: ${CONNECTOR_MAX_RESPONSE_BYTES:-1000000}
+    ports: ["3000:3000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 35s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M }
+
+  worker:
+    profiles: ["app"]
+    build: .
+    command: ["node", "dist/src/worker/main.js"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://agent:agent@postgres:5432/agent_platform}
+      WORKER_ID: ${WORKER_ID:-worker-compose-1}
+      LEASE_SECONDS: ${LEASE_SECONDS:-30}
+      WORKER_POLL_MS: ${WORKER_POLL_MS:-1000}
+      WORKER_ROLES: ${WORKER_ROLES:-}
+      DB_POOL_MAX: ${WORKER_DB_POOL_MAX:-20}
+      DB_POOL_IDLE_TIMEOUT_MS: ${DB_POOL_IDLE_TIMEOUT_MS:-30000}
+      DB_CONNECT_TIMEOUT_MS: ${DB_CONNECT_TIMEOUT_MS:-10000}
+      SHUTDOWN_GRACE_MS: ${SHUTDOWN_GRACE_MS:-30000}
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODELS: ${OLLAMA_MODELS:-}
+      OLLAMA_MODEL_CAPABILITIES_JSON: ${OLLAMA_MODEL_CAPABILITIES_JSON:-{}}
+      OPENAI_COMPAT_ENABLED: ${OPENAI_COMPAT_ENABLED:-false}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_MODELS: ${OPENAI_COMPAT_MODELS:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL_CAPABILITIES_JSON: ${OPENAI_COMPAT_MODEL_CAPABILITIES_JSON:-{}}
+      ANTHROPIC_ENABLED: ${ANTHROPIC_ENABLED:-false}
+      ANTHROPIC_MODELS: ${ANTHROPIC_MODELS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL_CAPABILITIES_JSON: ${ANTHROPIC_MODEL_CAPABILITIES_JSON:-{}}
+      GEMINI_ENABLED: ${GEMINI_ENABLED:-false}
+      GEMINI_MODELS: ${GEMINI_MODELS:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL_CAPABILITIES_JSON: ${GEMINI_MODEL_CAPABILITIES_JSON:-{}}
+      OLLAMA_EMBEDDING_BASE_URL: ${OLLAMA_EMBEDDING_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-}
+      OLLAMA_EMBEDDING_DIMENSIONS: ${OLLAMA_EMBEDDING_DIMENSIONS:-}
+      CONNECTOR_EGRESS_ALLOWLIST: ${CONNECTOR_EGRESS_ALLOWLIST:-}
+      CONNECTOR_ALLOW_PRIVATE_NETWORK: ${CONNECTOR_ALLOW_PRIVATE_NETWORK:-false}
+      CONNECTOR_TIMEOUT_MS: ${CONNECTOR_TIMEOUT_MS:-60000}
+      CONNECTOR_MAX_RESPONSE_BYTES: ${CONNECTOR_MAX_RESPONSE_BYTES:-1000000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 35s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1G }
+
+volumes:
+  agent_postgres:
