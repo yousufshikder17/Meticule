@@ -1,0 +1,65 @@
+{
+  "name": "durable-agent-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist/src",
+    "migrations",
+    "README.md",
+    "docs/api.md",
+    "docs/architecture.md",
+    "docs/configuration.md",
+    "docs/connectors-skills.md",
+    "docs/database.md",
+    "docs/decisions.md",
+    "docs/deployment.md",
+    "docs/execution-engines.md",
+    "docs/evaluation.md",
+    "docs/final-assessment.md",
+    "docs/limitations.md",
+    "docs/orchestration.md",
+    "docs/product.md",
+    "docs/observability.md",
+    "docs/providers.md",
+    "docs/roadmap.md",
+    "docs/stage-gates.md",
+    "docs/threat-model.md"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true,maxRetries:5,retryDelay:100})\" && tsc -p tsconfig.build.json",
+    "dev:api": "tsx watch src/api/main.ts",
+    "dev:worker": "tsx watch src/worker/main.ts",
+    "start:api": "node dist/src/api/main.js",
+    "start:worker": "node dist/src/worker/main.js",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:check": "tsx src/db/check-migrations.ts",
+    "dev:identity": "tsx scripts/dev-identity.ts",
+    "verify:ollama": "tsx scripts/manual-ollama-run.ts",
+    "verify:rag": "tsx scripts/manual-rag-run.ts",
+    "test": "npm run db:migrate && vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "npm run db:migrate && vitest run tests/integration"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "overrides": {
+    "nanoid": "3.3.18"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.12",
+    "ajv": "^8.17.1",
+    "hono": "^4.9.2",
+    "jose": "^6.1.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

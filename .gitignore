@@ -1,0 +1,49 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Environment and provider credentials (safe template remains tracked)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+.secrets/
+
+# IDE and editor state
+.idea/
+.vscode/
+*.suo
+*.user
+*.code-workspace
+*~
+*.swp
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary test/build output
+.tmp/
+tmp/
+temp/
+.cache/
+.vitest/
+test-results/
+playwright-report/
+junit.xml
+
+# Local database exports and data
+*.sql.dump
+*.dump
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+postgres-data/
