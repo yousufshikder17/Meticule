@@ -15,6 +15,9 @@ import { EvaluationService } from "../evaluation/evaluation-service.js";
 import { OperationalService } from "../observability/operational-service.js";
 import { logger } from "../observability/logger.js";
 import { runSchedulerCycle } from "./scheduler-cycle.js";
+import { mlConfiguration } from "../ml/configuration.js";
+import { TrainingProcessor } from "../ml/training-processor.js";
+import { PostgresArtifactStore } from "../ml/artifact-store.js";
 
 const config = loadConfig();
 const pool = getPool();
@@ -30,6 +33,8 @@ const evaluations = new EvaluationService(pool);
 const operations = new OperationalService(pool, providers);
 const roles = config.WORKER_ROLES.split(",").map((role) => role.trim()).filter(Boolean);
 const worker = new LifecycleWorker(pool, { workerId: config.WORKER_ID, leaseSeconds: config.LEASE_SECONDS }, { execute: (runId, workerId) => loop.execute(runId, workerId, roles) }, logger);
+const ml = mlConfiguration();
+const mlWorker = ml.enabled ? new LifecycleWorker(pool, { workerId: `${config.WORKER_ID}:ml`, leaseSeconds: config.LEASE_SECONDS, kind: "ml" }, new TrainingProcessor(pool, new PostgresArtifactStore(pool), ml.backends), logger) : null;
 let stopping = false;
 const requestStop = (): void => { stopping = true; void operations.heartbeat(config.WORKER_ID, "worker", { roles, pid: process.pid }, true).catch((error) => logger.log("error", "worker.drain_signal_failed", { workerId: config.WORKER_ID, error })); };
 process.once("SIGINT", requestStop);
@@ -44,6 +49,7 @@ while (!stopping) {
       () => orchestration.advanceNext(`${config.WORKER_ID}:orchestrator`),
       () => reconciler.reconcileNext(`${config.WORKER_ID}:reconciler`, config.LEASE_SECONDS),
       () => worker.tick(),
+      () => mlWorker?.tick() ?? Promise.resolve(false),
     ], () => stopping);
     if (!progressed && !stopping) await delay(config.WORKER_POLL_MS);
   }

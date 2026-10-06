@@ -6,6 +6,8 @@
   "files": [
     "dist/src",
     "migrations",
+    "ml",
+    "docs/ml.md",
     "README.md",
     "docs/api.md",
     "docs/architecture.md",
