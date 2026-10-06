@@ -20,6 +20,8 @@ CREATE POLICY tenant_isolation ON ml_dataset_schemas TO durable_agent_api
   USING(tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid)
   WITH CHECK(tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid);
 GRANT SELECT,INSERT ON ml_dataset_schemas TO durable_agent_api;
+-- PostgreSQL row locks require UPDATE privilege; these paths serialize version allocation.
+GRANT UPDATE(id) ON ml_datasets,ml_feature_pipelines,ml_registry_entries TO durable_agent_api;
 CREATE TRIGGER ml_schema_append_only BEFORE UPDATE OR DELETE ON ml_dataset_schemas FOR EACH ROW EXECUTE FUNCTION reject_evaluation_evidence_update();
 
 CREATE FUNCTION ml_evidence_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -41,6 +43,7 @@ BEGIN
   RETURN NEW;
 END $$;
 CREATE TRIGGER ml_registry_insert BEFORE INSERT ON ml_model_versions FOR EACH ROW EXECUTE FUNCTION ml_registry_insert_guard();
+CREATE UNIQUE INDEX ml_model_registration_idx ON ml_model_versions(tenant_id,registry_entry_id,training_run_id);
 
 CREATE FUNCTION ml_endpoint_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

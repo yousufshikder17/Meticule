@@ -1,5 +1,7 @@
 # Architecture overview
 
+Optional [ML V1](ml.md) is an isolated `src/ml` module. It extends canonical runs with workload-filtered leased training, frozen dataset/pipeline versions and attempt evidence. The backend owns computation only; PostgreSQL owns progress, artifacts, registry versions and prediction records. ML is disabled by default and adds no scheduler, UI or identity system.
+
 ## Boundary and modules
 
 The platform is one TypeScript modular monolith with an HTTP process and one or more worker processes sharing PostgreSQL. PostgreSQL is the system of record. The API records commands; leased workers advance the same canonical run. Providers and tools are ports invoked only by the canonical executor in later stages.

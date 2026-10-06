@@ -37,12 +37,14 @@ import { randomUUID } from "node:crypto";
 import { PRODUCT_CSS, PRODUCT_HTML, PRODUCT_JS } from "../product/product-ui.js";
 import { ProductService } from "../product/product-service.js";
 import { AuditQuerySchema, CreateMembershipSchema, RunListQuerySchema } from "../product/product-schema.js";
+import { registerMlRoutes } from "../ml/routes.js";
+import { mlConfiguration } from "../ml/configuration.js";
 
 export interface ReadinessControl { isDraining(): boolean; checkMigrations(): Promise<{ ready: boolean; missing: string[] }> }
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 
-export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval: RetrievalService | null = null, connectors: ConnectorService | null = null, providers: ProviderRegistry | null = null, structuredLogger: StructuredLogger = new NullLogger(), readiness: ReadinessControl | null = null): Hono<{ Variables: Variables }> {
+export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval: RetrievalService | null = null, connectors: ConnectorService | null = null, providers: ProviderRegistry | null = null, structuredLogger: StructuredLogger = new NullLogger(), readiness: ReadinessControl | null = null, ml: ReturnType<typeof mlConfiguration> = mlConfiguration()): Hono<{ Variables: Variables }> {
   const app = new Hono<{ Variables: Variables }>();
   const tools = createToolRegistry(pool, retrieval, connectors);
   const requireRetrieval = (): RetrievalService => { if (!retrieval) throw new EmbeddingConfigurationError("Retrieval is disabled because no real embedding provider is configured"); return retrieval; };
@@ -176,5 +178,6 @@ export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval
   app.get("/evaluations/:id", async (c) => c.json(await new EvaluationService(c.get("database")).getExecution(c.get("principal"), UuidSchema.parse(c.req.param("id")))));
   app.get("/evaluations/:id/compare/:otherId", async (c) => c.json(await new EvaluationService(c.get("database")).compare(c.get("principal"), UuidSchema.parse(c.req.param("id")), UuidSchema.parse(c.req.param("otherId")))));
 
+  registerMlRoutes(app, ml);
   return app;
 }

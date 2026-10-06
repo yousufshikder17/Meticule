@@ -48,6 +48,10 @@ $env:OLLAMA_EMBEDDING_DIMENSIONS='384'
 npm run verify:rag
 ```
 
+## Optional classical ML
+
+ML V1 supports versioned datasets/pipelines, durable training and evaluation, reproducible experiment records, explicit registration/promotion, version-pinned inference and regression comparison. It reuses the leased runtime and stores bounded artifacts in PostgreSQL. ML is disabled by default; see [ML setup and APIs](docs/ml.md) for the isolated scikit-learn backend.
+
 ## Controlled connectors
 
 MCP connectors are disabled unless `CONNECTOR_EGRESS_ALLOWLIST` contains exact HTTP(S) origins. Registrations store only environment-variable credential references, never secret values. Discovery validates bounded JSON Schema 2020-12 tool schemas, while descriptions, server instructions, and annotations remain untrusted. Agents opt in to connector IDs and the canonical `mcp_call` tool; every call requires human approval and resumes through the existing durable `ToolExecutor`.
