@@ -1,0 +1,39 @@
+import type pg from "pg";
+import type { ArtifactStore, MlBackend } from "./backend.js";
+import { validateRows } from "./domain.js";
+import { MlTrainingService } from "./persistence.js";
+
+export class TrainingProcessor {
+  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>) {}
+  async execute(runId: string, workerId: string): Promise<void> {
+    const service = new MlTrainingService(this.pool, this.artifacts);
+    const controller = new AbortController(); const started = Date.now();
+    let attemptId: string | undefined;
+    // Check ownership while backend compute is in flight, so cancellation/lease loss kills it.
+    const guard = setInterval(() => {
+      if (!attemptId) return;
+      void this.pool.query("SELECT 1 FROM runs r JOIN ml_training_jobs j ON j.run_id=r.id AND j.tenant_id=r.tenant_id JOIN ml_training_runs t ON t.job_id=j.id AND t.tenant_id=j.tenant_id WHERE r.id=$1 AND r.status='running' AND r.lease_owner=$2 AND r.lease_expires_at>now() AND r.cancellation_requested_at IS NULL AND t.id=$3 AND t.ended_at IS NULL", [runId, workerId, attemptId])
+        .then(r => { if (!r.rowCount) controller.abort(); }).catch(() => controller.abort());
+    }, 500);
+    try {
+      const attempt = await service.begin(runId, workerId); attemptId = attempt.id; const snapshot = attempt.snapshot;
+      const backend = this.backends.get(snapshot.backend); if (!backend) throw new Error("Training backend is not configured"); backend.validate(snapshot);
+      const data = await this.artifacts.get(attempt.tenantId, snapshot.dataset.content);
+      const rows = validateRows(snapshot.dataset.schema, JSON.parse(data.toString("utf8")));
+      if (rows.length !== snapshot.dataset.rowCount) throw new Error("Dataset row count mismatch");
+      const prepared = await backend.prepare(snapshot, rows, controller.signal);
+      const partitions = Object.values(prepared.indices); const all = partitions.flat();
+      if (partitions.some(p => !p.length) || all.length !== rows.length || new Set(all).size !== rows.length || all.some(i => !Number.isInteger(i) || i < 0 || i >= rows.length)) throw new Error("Backend returned invalid split indices");
+      await service.phase(runId, workerId, attempt.id, "TRAINING", prepared);
+      const model = await backend.train(snapshot, rows, prepared, controller.signal);
+      await service.phase(runId, workerId, attempt.id, "EVALUATING", undefined, model);
+      const metrics = await backend.evaluate(snapshot, rows, prepared, model, controller.signal);
+      if (!metrics.length || ["train", "validation", "test"].some(p => !metrics.some(m => m.partition === p))) throw new Error("Backend omitted evaluation partitions");
+      await service.phase(runId, workerId, attempt.id, "SAVING");
+      const content = await this.artifacts.put(attempt.tenantId, model.bytes, "application/octet-stream");
+      await service.finish(runId, workerId, attempt.id, snapshot, metrics, content, model.format, Date.now() - started);
+    } catch (error) {
+      await service.fail(runId, workerId, attemptId, error instanceof Error ? error.message.slice(0, 500) : "Training failed");
+    } finally { clearInterval(guard); controller.abort(); }
+  }
+}

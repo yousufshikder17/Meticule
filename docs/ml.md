@@ -24,6 +24,8 @@ All public precursor files were inspected before replacement. Useful ideas retai
 
 The public checkout already has tenant/auth infrastructure; this port does not introduce a second tenancy mechanism or identity issuer. No private environment files, credentials, datasets, generated artifacts, private UI or deployment configuration are included.
 
+Publication and failure handling both check the current immutable attempt ID under the canonical run lock, including reclamation by a process using the same worker ID. Public artifact bytes live in a tenant-scoped `ml_blobs` table, addressed by SHA-256 and checked against the recorded hash and size before loading. Each blob is capped at 16 MB; larger data/checkpoints require a different storage adapter.
+
 ## Migration compatibility
 
 Apply normal migrations before starting upgraded API/workers, and restart older workers before enabling ML. The uncommitted `002_ml.sql` precursor was never part of the released public migration chain. If it was manually applied locally, V1 migration fails explicitly rather than overwriting its incompatible tables or discarding data. Export that experimental data and migrate a fresh database; no automatic destructive conversion is performed.

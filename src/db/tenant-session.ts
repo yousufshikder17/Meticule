@@ -3,7 +3,7 @@ import type pg from "pg";
 let savepointSequence = 0;
 const emptyResult = (): pg.QueryResult => ({ command: "", rowCount: null, oid: 0, rows: [], fields: [] });
 
-function scopedPool(client: pg.PoolClient): pg.Pool {
+export function scopedPool(client: pg.PoolClient): pg.Pool {
   return {
     query: client.query.bind(client),
     connect: async () => {
