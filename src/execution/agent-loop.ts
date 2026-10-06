@@ -41,6 +41,7 @@ export class AgentLoop {
         const run = await this.runs.get(principal.tenantId, runId);
         if (run.status === "cancelling") { await this.runs.workerTransition(runId, workerId, "cancelled"); return; }
         if (run.status !== "running") throw new ConflictError(`Run is not executable: ${run.status}`);
+        if (run.kind !== "agent" || !run.agentId || !run.agentConfigurationSnapshot || !run.agentVersion) throw new ConflictError("Agent loop requires an agent run");
         const currentAgent = await this.agents.get(principal.tenantId, run.agentId);
         const agent: typeof currentAgent = { ...currentAgent, ...run.agentConfigurationSnapshot, version: run.agentVersion };
         const resumed = await this.tools.resumeApproved({ principal, runId, workerId });

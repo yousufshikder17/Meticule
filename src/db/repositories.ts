@@ -35,12 +35,12 @@ function agentFrom(row: Row): AgentRecord {
 
 function runFrom(row: Row): Run {
   return {
-    id: row.id as string, tenantId: row.tenant_id as string, agentId: row.agent_id as string,
+    id: row.id as string, tenantId: row.tenant_id as string, kind: row.kind as Run["kind"], agentId: row.agent_id as string | null,
     createdBy: row.created_by as string, goal: row.goal as string, status: row.status as RunState,
     currentStep: row.current_step as number, version: row.version as number,
     leaseOwner: row.lease_owner as string | null, leaseExpiresAt: row.lease_expires_at as Date | null,
     cancellationRequestedAt: row.cancellation_requested_at as Date | null,
-    agentVersion: Number(row.agent_version), agentConfigurationSnapshot: AgentConfigurationSchema.parse(row.agent_configuration_snapshot),
+    agentVersion: row.agent_version === null ? null : Number(row.agent_version), agentConfigurationSnapshot: row.agent_configuration_snapshot === null ? null : AgentConfigurationSchema.parse(row.agent_configuration_snapshot),
     parentRunId: row.parent_run_id as string | null, rootRunId: row.root_run_id as string, delegationDepth: Number(row.delegation_depth), delegationRole: row.delegation_role as string | null, contextScope: row.context_scope as Run["contextScope"],
     tokenBudgetLimit: Number(row.token_budget_limit), costBudgetLimitMicrousd: Number(row.cost_budget_limit_microusd), reservedChildTokens: Number(row.reserved_child_tokens), reservedChildCostMicrousd: Number(row.reserved_child_cost_microusd),
     inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens),
@@ -189,11 +189,11 @@ export class RunRepository {
     });
   }
 
-  async claimNext(workerId: string, leaseSeconds: number): Promise<Run | null> {
+  async claimNext(workerId: string, leaseSeconds: number, kind: Run["kind"] = "agent"): Promise<Run | null> {
     return transaction(this.pool, async (client) => {
       const selected = await client.query(
-        `SELECT * FROM runs WHERE status='queued' AND cancellation_requested_at IS NULL
-         ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1`,
+        `SELECT * FROM runs WHERE status='queued' AND cancellation_requested_at IS NULL AND kind=$1
+         ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1`, [kind],
       );
       if (!selected.rowCount) return null;
       const before = runFrom(selected.rows[0] as Row); assertTransition(before.status, "claimed");
@@ -322,7 +322,8 @@ export class RunRepository {
             }
           }
         }
-        assertTransition(run.status, to);
+        // ML computation is safe to restart as a new attempt; agent recovery stays unchanged.
+        if (!(run.kind === "ml" && run.status === "running" && to === "queued")) assertTransition(run.status, to);
         await client.query(
           `UPDATE runs SET status=$1,lease_owner=NULL,lease_expires_at=NULL,version=version+1,updated_at=now(),
            completed_at=CASE WHEN $1::run_status='cancelled' THEN now() ELSE completed_at END WHERE id=$2`, [to, run.id],

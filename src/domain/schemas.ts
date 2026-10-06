@@ -96,7 +96,8 @@ export const ApprovalDecisionSchema = z.object({ comment: z.string().trim().max(
 export const RunSchema = z.object({
   id: UuidSchema,
   tenantId: UuidSchema,
-  agentId: UuidSchema,
+  kind: z.enum(["agent", "ml"]).default("agent"),
+  agentId: UuidSchema.nullable(),
   createdBy: UuidSchema,
   goal: z.string(),
   status: RunStateSchema,
@@ -105,7 +106,7 @@ export const RunSchema = z.object({
   leaseOwner: z.string().nullable(),
   leaseExpiresAt: z.date().nullable(),
   cancellationRequestedAt: z.date().nullable(),
-  agentVersion: z.int().positive(), agentConfigurationSnapshot: AgentConfigurationSchema,
+  agentVersion: z.int().positive().nullable(), agentConfigurationSnapshot: AgentConfigurationSchema.nullable(),
   parentRunId: UuidSchema.nullable(), rootRunId: UuidSchema, delegationDepth: z.int().nonnegative(), delegationRole: z.string().nullable(), contextScope: z.enum(["private","shared"]),
   tokenBudgetLimit: z.int().nonnegative(), costBudgetLimitMicrousd: z.int().nonnegative(), reservedChildTokens: z.int().nonnegative(), reservedChildCostMicrousd: z.int().nonnegative(),
   inputTokens: z.int().nonnegative(),

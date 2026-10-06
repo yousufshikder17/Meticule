@@ -2,7 +2,7 @@ import type pg from "pg";
 import { RunRepository } from "../db/repositories.js";
 import { NullLogger, type StructuredLogger } from "../observability/logger.js";
 
-export interface WorkerOptions { workerId: string; leaseSeconds: number }
+export interface WorkerOptions { workerId: string; leaseSeconds: number; kind?: "agent" | "ml" }
 export interface RunProcessor { execute(runId: string, workerId: string): Promise<void> }
 
 export class LifecycleWorker {
@@ -12,7 +12,7 @@ export class LifecycleWorker {
   async tick(): Promise<boolean> {
     await this.runs.recoverExpired();
     await this.runs.finalizeUnleasedCancellations();
-    const claimed = await this.runs.claimNext(this.options.workerId, this.options.leaseSeconds);
+    const claimed = await this.runs.claimNext(this.options.workerId, this.options.leaseSeconds, this.options.kind);
     if (!claimed) return false;
     const started = Date.now(); this.logger.log("info", "worker.run_claimed", { workerId: this.options.workerId, tenantId: claimed.tenantId, runId: claimed.id });
     await this.runs.workerTransition(claimed.id, this.options.workerId, "running");
