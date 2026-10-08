@@ -2,28 +2,29 @@ import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
-import type { MlBackend, PreparedData, TrainedModel } from "./backend.js";
+import type { Evaluation, MlBackend, PreparedData, TrainedModel } from "./backend.js";
 import { Metric, validateSnapshot, type Row, type Snapshot } from "./domain.js";
+import { assertMetricsSupported, DEFAULT_METRICS } from "./metrics.js";
+import { getModel, validateHyperparameters } from "./model-catalog.js";
+import { validatePipeline } from "./preprocessing.js";
 
-const commonForest = { n_estimators: z.int().min(1).max(1000).optional(), max_depth: z.int().min(1).max(100).nullable().optional(), min_samples_leaf: z.int().min(1).max(1000).optional() };
-const parameters = new Map<string, z.ZodType>([
-  ["ridge", z.strictObject({ alpha: z.number().min(0).max(1e6).optional() })],
-  ["logistic_regression", z.strictObject({ C: z.number().gt(0).max(1e6).optional(), max_iter: z.int().min(1).max(10_000).optional() })],
-  ["random_forest_classifier", z.strictObject(commonForest)], ["random_forest_regressor", z.strictObject(commonForest)],
-]);
 const Environment = z.record(z.string(), z.string());
-const Prepared = z.object({ indices: z.object({ train: z.array(z.int().nonnegative()), validation: z.array(z.int().nonnegative()), test: z.array(z.int().nonnegative()) }), environment: Environment });
+const Indices = z.array(z.int().nonnegative());
+const Prepared = z.object({ indices: z.object({ train: Indices, validation: Indices, test: Indices }), folds: z.array(Indices).optional(), environment: Environment });
+const Performance = z.record(z.string(), z.number().finite().nonnegative());
 
 export class SklearnBackend implements MlBackend {
   readonly id = "sklearn";
+  readonly artifactFormats = ["sklearn-pickle-v1"] as const;
   constructor(private readonly python: string, private readonly timeoutMs = 120_000, private readonly script = resolve(process.cwd(), "ml/sklearn_runner.py")) {}
   validate(snapshot: Snapshot): void {
     validateSnapshot(snapshot);
     if (snapshot.backend !== this.id) throw new ConflictError("Backend mismatch");
-    const schema = parameters.get(snapshot.algorithm); if (!schema) throw new ConflictError("Unsupported scikit-learn algorithm"); schema.parse(snapshot.hyperparameters);
-    if (snapshot.pipeline.definition.features.some(f => snapshot.dataset.schema.columns.find(c => c.name === f)?.type !== "number")) throw new ConflictError("Initial sklearn backend requires numeric features");
-    for (const step of snapshot.pipeline.definition.steps) if (!["impute_median", "standard_scale"].includes(step.operation) || Object.keys(step.parameters).length) throw new ConflictError("Unsupported sklearn pipeline operation/parameters");
-    if (snapshot.split.stratify && ["ridge", "random_forest_regressor"].includes(snapshot.algorithm)) throw new ConflictError("Regression cannot stratify by target");
+    const model = getModel(this.id, snapshot.algorithm); validateHyperparameters(model, snapshot.hyperparameters);
+    validatePipeline(snapshot);
+    const { cv, metrics } = snapshot.evaluation;
+    if ((snapshot.split.stratify || cv?.strategy === "stratified_kfold") && model.taskType === "regression") throw new ConflictError("Regression cannot stratify by target");
+    assertMetricsSupported(model, metrics ?? DEFAULT_METRICS[model.taskType]);
   }
   private call(command: string, snapshot: Snapshot, rows: Row[], extra: object, signal: AbortSignal): Promise<unknown> {
     this.validate(snapshot); signal.throwIfAborted();
@@ -45,11 +46,12 @@ export class SklearnBackend implements MlBackend {
   }
   async prepare(snapshot: Snapshot, rows: Row[], signal: AbortSignal): Promise<PreparedData> { return Prepared.parse(await this.call("prepare", snapshot, rows, {}, signal)); }
   async train(snapshot: Snapshot, rows: Row[], prepared: PreparedData, signal: AbortSignal): Promise<TrainedModel> {
-    const output = z.object({ artifact: z.string().min(1), format: z.literal("sklearn-pickle-v1"), environment: Environment, resolvedHyperparameters: z.record(z.string(), z.unknown()) }).parse(await this.call("train", snapshot, rows, { prepared, expectedEnvironment: prepared.environment }, signal));
-    return { bytes: Buffer.from(output.artifact, "base64"), format: output.format, environment: output.environment, resolvedHyperparameters: output.resolvedHyperparameters };
+    const output = z.object({ artifact: z.string().min(1), format: z.literal("sklearn-pickle-v1"), environment: Environment, resolvedHyperparameters: z.record(z.string(), z.unknown()), performance: Performance.optional() }).parse(await this.call("train", snapshot, rows, { prepared, expectedEnvironment: prepared.environment }, signal));
+    return { bytes: Buffer.from(output.artifact, "base64"), format: output.format, environment: output.environment, resolvedHyperparameters: output.resolvedHyperparameters, performance: output.performance };
   }
-  async evaluate(snapshot: Snapshot, rows: Row[], prepared: PreparedData, model: TrainedModel, signal: AbortSignal) {
-    const output = z.object({ metrics: z.array(Metric.omit({ id: true })) }).parse(await this.call("evaluate", snapshot, rows, { prepared, artifact: model.bytes.toString("base64"), expectedEnvironment: model.environment }, signal)); return output.metrics;
+  async evaluate(snapshot: Snapshot, rows: Row[], prepared: PreparedData, model: TrainedModel, signal: AbortSignal) { return (await this.evaluateDetailed(snapshot, rows, prepared, model, signal)).metrics; }
+  async evaluateDetailed(snapshot: Snapshot, rows: Row[], prepared: PreparedData, model: TrainedModel, signal: AbortSignal): Promise<Evaluation> {
+    return z.object({ metrics: z.array(Metric.omit({ id: true })), performance: Performance.optional() }).parse(await this.call("evaluate", snapshot, rows, { prepared, artifact: model.bytes.toString("base64"), expectedEnvironment: model.environment }, signal));
   }
   async predict(snapshot: Snapshot, artifact: Buffer, rows: Row[], environment: Record<string, string>, signal: AbortSignal): Promise<unknown[]> {
     return z.object({ predictions: z.array(z.json()) }).parse(await this.call("predict", snapshot, rows, { artifact: artifact.toString("base64"), expectedEnvironment: environment }, signal)).predictions;

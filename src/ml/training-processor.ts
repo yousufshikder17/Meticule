@@ -3,6 +3,13 @@ import type { ArtifactStore, MlBackend } from "./backend.js";
 import { validateRows } from "./domain.js";
 import { MlTrainingService } from "./persistence.js";
 
+/** CV folds must exactly partition the training indices: the leakage boundary the backend is trusted to honour. */
+function assertFolds(train: number[], folds: number[][] | undefined, expected: boolean, count?: number): void {
+  if (!expected) { if (folds) throw new Error("Backend returned unexpected CV folds"); return; }
+  const flat = (folds ?? []).flat(); const allowed = new Set(train);
+  if (!folds || folds.length !== count || folds.some(f => !f.length) || flat.length !== allowed.size || new Set(flat).size !== flat.length || flat.some(i => !allowed.has(i))) throw new Error("Backend returned invalid CV folds");
+}
+
 export class TrainingProcessor {
   constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>) {}
   async execute(runId: string, workerId: string): Promise<void> {
@@ -24,12 +31,14 @@ export class TrainingProcessor {
       const prepared = await backend.prepare(snapshot, rows, controller.signal);
       const partitions = Object.values(prepared.indices); const all = partitions.flat();
       if (partitions.some(p => !p.length) || all.length !== rows.length || new Set(all).size !== rows.length || all.some(i => !Number.isInteger(i) || i < 0 || i >= rows.length)) throw new Error("Backend returned invalid split indices");
+      assertFolds(prepared.indices.train, prepared.folds, Boolean(snapshot.evaluation.cv), snapshot.evaluation.cv?.folds);
       await service.phase(runId, workerId, attempt.id, "TRAINING", prepared);
       const model = await backend.train(snapshot, rows, prepared, controller.signal);
       await service.phase(runId, workerId, attempt.id, "EVALUATING", undefined, model);
-      const metrics = await backend.evaluate(snapshot, rows, prepared, model, controller.signal);
-      if (!metrics.length || ["train", "validation", "test"].some(p => !metrics.some(m => m.partition === p))) throw new Error("Backend omitted evaluation partitions");
-      await service.phase(runId, workerId, attempt.id, "SAVING");
+      const { metrics, performance } = backend.evaluateDetailed ? await backend.evaluateDetailed(snapshot, rows, prepared, model, controller.signal) : { metrics: await backend.evaluate(snapshot, rows, prepared, model, controller.signal) };
+      const required = snapshot.evaluation.cv ? ["train", "validation", "test", "cv", "cv_fold"] : ["train", "validation", "test"];
+      if (!metrics.length || required.some(p => !metrics.some(m => m.partition === p)) || (!snapshot.evaluation.cv && metrics.some(m => m.partition.startsWith("cv")))) throw new Error("Backend omitted evaluation partitions");
+      await service.phase(runId, workerId, attempt.id, "SAVING", undefined, undefined, performance);
       const content = await this.artifacts.put(attempt.tenantId, model.bytes, "application/octet-stream");
       await service.finish(runId, workerId, attempt.id, snapshot, metrics, content, model.format, Date.now() - started);
     } catch (error) {

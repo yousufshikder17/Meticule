@@ -4,7 +4,7 @@ import { ConflictError, NotFoundError } from "../domain/errors.js";
 import { canonicalJsonHash } from "../domain/canonical-json.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, MlBackend } from "./backend.js";
-import { TrainingSnapshot, assertModelTransition, compareMetrics, validateRows, type ModelState, type MetricValue } from "./domain.js";
+import { TrainingSnapshot, assertModelTransition, cohortKey, compareMetrics, validateRows, type ModelState, type MetricValue } from "./domain.js";
 import { audit, authorizeMl, transaction } from "./persistence.js";
 
 const Name = z.string().trim().min(1).max(120);
@@ -80,6 +80,7 @@ export class MlModelService {
     });
     const started = Date.now(); let output: unknown[] | null = null; let failure: { code: string; message: string } | null = null;
     try {
+      if (pending.backend.artifactFormats && !pending.backend.artifactFormats.includes(pending.model.format)) throw new Error("Unsupported artifact format");
       const bytes = await this.artifacts.get(principal.tenantId, pending.model.content);
       output = await pending.backend.predict(pending.snapshot, bytes, pending.rows, pending.model.environment, signal);
       if (output.length !== pending.rows.length) throw new Error("Prediction count mismatch");
@@ -95,9 +96,8 @@ export class MlModelService {
     const results = await this.pool.query("SELECT id,snapshot,split_indices FROM ml_training_runs WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND status='COMPLETED'", [principal.tenantId, [baselineId, candidateId]]);
     const baseline = results.rows.find(r => r.id === baselineId), candidate = results.rows.find(r => r.id === candidateId);
     if (!baseline || !candidate) throw new NotFoundError("Completed comparison attempts not found");
-    const comparisonKey = (raw: unknown, indices: unknown) => { const s = TrainingSnapshot.parse(raw); return canonicalJsonHash({ dataset: s.dataset.content.sha256, schema: s.dataset.schema, pipeline: s.pipeline.definition, split: { ...s.split, id: null }, seed: s.seed, indices }); };
-    if (comparisonKey(baseline.snapshot, baseline.split_indices) !== comparisonKey(candidate.snapshot, candidate.split_indices)) throw new ConflictError("Regression comparison requires matching data, schema, features, actual split and seed");
-    const load = async (id: string): Promise<MetricValue[]> => (await this.pool.query("SELECT name,partition,value,direction FROM ml_metrics WHERE tenant_id=$1 AND training_run_id=$2 ORDER BY partition,name", [principal.tenantId, id])).rows as MetricValue[];
+    if (cohortKey(baseline.snapshot, baseline.split_indices) !== cohortKey(candidate.snapshot, candidate.split_indices)) throw new ConflictError("Regression comparison requires matching data, schema, features, actual split and seed");
+    const load = async (id: string): Promise<MetricValue[]> => (await this.pool.query("SELECT name,partition,value,direction,fold,std FROM ml_metrics WHERE tenant_id=$1 AND training_run_id=$2 ORDER BY partition,name,fold", [principal.tenantId, id])).rows as MetricValue[];
     const [b, c] = await Promise.all([load(baselineId), load(candidateId)]); return compareMetrics(b, c);
   }
 }

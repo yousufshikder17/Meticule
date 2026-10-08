@@ -6,8 +6,8 @@ import { canonicalJson, canonicalJsonHash } from "../domain/canonical-json.js";
 import { RunRepository } from "../db/repositories.js";
 import { scopedPool } from "../db/tenant-session.js";
 import type { Principal } from "../db/types.js";
-import type { ArtifactStore, PreparedData, TrainedModel } from "./backend.js";
-import { DatasetSchema, DatasetVersion, FeaturePipeline, Metric, PipelineDefinition, TrainingSnapshot, TrainingSpec, assertTrainingTransition, validateRows, validateSnapshot, type ArtifactReference, type MetricValue, type Snapshot, type TrainingState } from "./domain.js";
+import type { ArtifactStore, Performance, PreparedData, TrainedModel } from "./backend.js";
+import { DatasetSchema, DatasetVersion, FeaturePipeline, Metric, PipelineDefinition, TrainingSnapshot, TrainingSpec, assertMetricShape, assertTrainingTransition, validateRows, validateSnapshot, type ArtifactReference, type MetricValue, type Snapshot, type TrainingState } from "./domain.js";
 
 export function authorizeMl(p: Principal, write = false): void {
   if (write && !p.roles.includes("tenant_admin")) throw new AuthorizationError("Required role: tenant_admin");
@@ -26,6 +26,10 @@ export async function ownedRun(c: pg.PoolClient, runId: string, workerId: string
   const run = r.rows[0];
   if (!run || run.kind !== "ml" || run.status !== "running" || run.cancellation_requested_at || run.lease_owner !== workerId || !run.lease_valid) throw new ConflictError("ML worker does not own an executable lease");
   return run;
+}
+/** Fold k is stored as `fold_k` (its validation indices) beside train/validation/test, so cohort comparison sees exact CV folds. */
+export function splitIndices(prepared: PreparedData): Record<string, number[]> {
+  return { ...prepared.indices, ...Object.fromEntries((prepared.folds ?? []).map((f, i) => [`fold_${i}`, f])) };
 }
 const Name = z.string().trim().min(1).max(120);
 export const IngestDataset = z.object({ name: Name, schema: DatasetSchema, rows: z.unknown() });
@@ -57,17 +61,19 @@ export class MlTrainingService {
   }
   async pipeline(principal: Principal, raw: unknown, logicalId?: string) {
     authorizeMl(principal, true); const input = CreatePipeline.parse(raw);
-    return transaction(this.pool, async c => {
-      let version = 1; const id = randomUUID();
-      if (logicalId) {
-        const root = await c.query("SELECT id FROM ml_feature_pipelines WHERE tenant_id=$1 AND logical_id=$2 AND version=1 FOR UPDATE", [principal.tenantId, logicalId]);
-        if (!root.rowCount) throw new NotFoundError("Pipeline not found");
-        const r = await c.query("SELECT max(version)+1 AS version FROM ml_feature_pipelines WHERE tenant_id=$1 AND logical_id=$2", [principal.tenantId, logicalId]); version = r.rows[0].version;
-      }
-      const doc = FeaturePipeline.parse({ id, tenantId: principal.tenantId, logicalId: logicalId ?? id, version, name: input.name, definition: input.definition, createdAt: new Date().toISOString() });
-      await c.query("INSERT INTO ml_feature_pipelines(id,tenant_id,logical_id,version,document) VALUES($1,$2,$3,$4,$5)", [id, principal.tenantId, doc.logicalId, version, JSON.stringify(doc)]);
-      await audit(c, principal.tenantId, principal.userId, "ml.pipeline_version_created", { pipelineId: id }); return doc;
-    });
+    return transaction(this.pool, c => this.pipelineIn(c, principal, input, logicalId));
+  }
+  /** Transaction-scoped form so orchestrations can create pipelines atomically with their jobs. */
+  async pipelineIn(c: pg.PoolClient, principal: Principal, input: z.infer<typeof CreatePipeline>, logicalId?: string) {
+    let version = 1; const id = randomUUID();
+    if (logicalId) {
+      const root = await c.query("SELECT id FROM ml_feature_pipelines WHERE tenant_id=$1 AND logical_id=$2 AND version=1 FOR UPDATE", [principal.tenantId, logicalId]);
+      if (!root.rowCount) throw new NotFoundError("Pipeline not found");
+      const r = await c.query("SELECT max(version)+1 AS version FROM ml_feature_pipelines WHERE tenant_id=$1 AND logical_id=$2", [principal.tenantId, logicalId]); version = r.rows[0].version;
+    }
+    const doc = FeaturePipeline.parse({ id, tenantId: principal.tenantId, logicalId: logicalId ?? id, version, name: input.name, definition: input.definition, createdAt: new Date().toISOString() });
+    await c.query("INSERT INTO ml_feature_pipelines(id,tenant_id,logical_id,version,document) VALUES($1,$2,$3,$4,$5)", [id, principal.tenantId, doc.logicalId, version, JSON.stringify(doc)]);
+    await audit(c, principal.tenantId, principal.userId, "ml.pipeline_version_created", { pipelineId: id }); return doc;
   }
   async experiment(principal: Principal, name: string) {
     authorizeMl(principal, true); Name.parse(name);
@@ -78,17 +84,19 @@ export class MlTrainingService {
   }
   async queue(principal: Principal, raw: unknown) {
     authorizeMl(principal, true); const input = QueueTraining.parse(raw);
-    return transaction(this.pool, async c => {
-      const e = await c.query("SELECT id FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.experimentId]);
-      const d = await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.spec.datasetVersionId]);
-      const p = await c.query("SELECT document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.spec.featurePipelineId]);
-      if (!e.rowCount || !d.rowCount || !p.rowCount) throw new NotFoundError("Experiment, dataset version or pipeline not found");
-      const snapshot = TrainingSnapshot.parse({ ...input.spec, dataset: d.rows[0].document, pipeline: p.rows[0].document }); validateSnapshot(snapshot);
-      const runId = randomUUID();
-      await c.query("INSERT INTO runs(id,tenant_id,kind,created_by,goal,root_run_id,token_budget_limit,cost_budget_limit_microusd) VALUES($1,$2,'ml',$3,'ML training',$1,0,0)", [runId, principal.tenantId, principal.userId]);
-      const job = await c.query("INSERT INTO ml_training_jobs(tenant_id,run_id,experiment_id,dataset_version_id,pipeline_id,snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [principal.tenantId, runId, input.experimentId, snapshot.datasetVersionId, snapshot.featurePipelineId, JSON.stringify(snapshot)]);
-      await audit(c, principal.tenantId, principal.userId, "ml.training_queued", { jobId: job.rows[0].id }, runId); return job.rows[0];
-    });
+    return transaction(this.pool, c => this.queueIn(c, principal, input));
+  }
+  /** Transaction-scoped form used by benchmark/search/AutoML to create many ordinary jobs atomically. */
+  async queueIn(c: pg.PoolClient, principal: Principal, input: z.infer<typeof QueueTraining>) {
+    const e = await c.query("SELECT id FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.experimentId]);
+    const d = await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.spec.datasetVersionId]);
+    const p = await c.query("SELECT document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.spec.featurePipelineId]);
+    if (!e.rowCount || !d.rowCount || !p.rowCount) throw new NotFoundError("Experiment, dataset version or pipeline not found");
+    const snapshot = TrainingSnapshot.parse({ ...input.spec, dataset: d.rows[0].document, pipeline: p.rows[0].document }); validateSnapshot(snapshot);
+    const runId = randomUUID();
+    await c.query("INSERT INTO runs(id,tenant_id,kind,created_by,goal,root_run_id,token_budget_limit,cost_budget_limit_microusd) VALUES($1,$2,'ml',$3,'ML training',$1,0,0)", [runId, principal.tenantId, principal.userId]);
+    const job = await c.query("INSERT INTO ml_training_jobs(tenant_id,run_id,experiment_id,dataset_version_id,pipeline_id,snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [principal.tenantId, runId, input.experimentId, snapshot.datasetVersionId, snapshot.featurePipelineId, JSON.stringify(snapshot)]);
+    await audit(c, principal.tenantId, principal.userId, "ml.training_queued", { jobId: job.rows[0].id }, runId); return job.rows[0];
   }
   async getJob(principal: Principal, id: string) {
     authorizeMl(principal);
@@ -113,12 +121,12 @@ export class MlTrainingService {
       return { id: t.rows[0].id as string, tenantId: run.tenant_id as string, snapshot };
     });
   }
-  async phase(runId: string, workerId: string, attemptId: string, to: TrainingState, prepared?: PreparedData, model?: TrainedModel) {
+  async phase(runId: string, workerId: string, attemptId: string, to: TrainingState, prepared?: PreparedData, model?: TrainedModel, performance?: Performance) {
     return transaction(this.pool, async c => {
       const run = await ownedRun(c, runId, workerId);
       const t = (await c.query("SELECT t.* FROM ml_training_runs t JOIN ml_training_jobs j ON j.id=t.job_id AND j.tenant_id=t.tenant_id WHERE t.id=$1 AND j.run_id=$2 FOR UPDATE OF t", [attemptId, runId])).rows[0];
       if (!t) throw new ConflictError("Attempt is not current"); assertTrainingTransition(t.status, to);
-      await c.query("UPDATE ml_training_runs SET status=$1,environment=COALESCE($2::jsonb,environment),split_indices=COALESCE($3::jsonb,split_indices),resolved_hyperparameters=COALESCE($4::jsonb,resolved_hyperparameters) WHERE id=$5", [to, model ? JSON.stringify(model.environment) : prepared ? JSON.stringify(prepared.environment) : null, prepared ? JSON.stringify(prepared.indices) : null, model ? JSON.stringify(model.resolvedHyperparameters) : null, attemptId]);
+      await c.query("UPDATE ml_training_runs SET status=$1,environment=COALESCE($2::jsonb,environment),split_indices=COALESCE($3::jsonb,split_indices),resolved_hyperparameters=COALESCE($4::jsonb,resolved_hyperparameters),performance=performance||$6::jsonb WHERE id=$5", [to, model ? JSON.stringify(model.environment) : prepared ? JSON.stringify(prepared.environment) : null, prepared ? JSON.stringify(splitIndices(prepared)) : null, model ? JSON.stringify(model.resolvedHyperparameters) : null, attemptId, JSON.stringify({ ...model?.performance, ...performance })]);
       await c.query("UPDATE ml_training_jobs SET status=$1 WHERE id=$2", [to, t.job_id]);
       await audit(c, run.tenant_id, workerId, "ml.phase_changed", { trainingRunId: attemptId, from: t.status, to }, runId, "worker");
     });
@@ -129,8 +137,8 @@ export class MlTrainingService {
       const t = (await c.query("SELECT t.id FROM ml_training_runs t JOIN ml_training_jobs j ON j.id=t.job_id AND j.tenant_id=t.tenant_id WHERE t.id=$1 AND j.run_id=$2 AND t.status='SAVING' FOR UPDATE OF t", [attemptId, runId])).rows[0];
       if (!t) throw new ConflictError("No current saving attempt");
       for (const raw of metrics) {
-        const m = Metric.parse({ ...raw, id: randomUUID() });
-        await c.query("INSERT INTO ml_metrics(id,tenant_id,training_run_id,name,partition,value,direction) VALUES($1,$2,$3,$4,$5,$6,$7)", [m.id, run.tenant_id, attemptId, m.name, m.partition, m.value, m.direction]);
+        assertMetricShape(raw); const m = Metric.parse({ ...raw, id: randomUUID() });
+        await c.query("INSERT INTO ml_metrics(id,tenant_id,training_run_id,name,partition,value,direction,fold,std) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [m.id, run.tenant_id, attemptId, m.name, m.partition, m.value, m.direction, m.fold ?? null, m.std ?? null]);
       }
       const a = await c.query("INSERT INTO ml_artifacts(tenant_id,training_run_id,kind,format,content) VALUES($1,$2,'model',$3,$4) RETURNING id", [run.tenant_id, attemptId, format, JSON.stringify(content)]);
       await c.query("INSERT INTO usage_records(tenant_id,run_id,provider,model,input_tokens,output_tokens,cost_microusd,usage_kind,duration_ms) VALUES($1,$2,$3,$4,0,0,0,'ml_training',$5)", [run.tenant_id, runId, snapshot.backend, snapshot.algorithm, durationMs]);

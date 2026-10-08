@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
+import { canonicalJsonHash } from "../domain/canonical-json.js";
 
 const Id = z.uuid();
 const Name = z.string().trim().min(1).max(120);
@@ -23,7 +24,10 @@ export const PipelineDefinition = z.object({
 export const FeaturePipeline = Identity.extend({ logicalId: Id, version: z.int().positive(), name: Name, definition: PipelineDefinition });
 export const SplitDefinition = z.object({ id: Id, strategy: z.literal("random"), train: z.number().gt(0).lt(1), validation: z.number().gt(0).lt(1), test: z.number().gt(0).lt(1), stratify: z.boolean().default(false) })
   .refine(x => Math.abs(x.train + x.validation + x.test - 1) < 1e-9, "Split fractions must sum to one");
-export const TrainingSpec = z.object({ datasetVersionId: Id, featurePipelineId: Id, backend: Name, algorithm: Name, hyperparameters: JsonObject.default({}), seed: z.int().min(0).max(4_294_967_295), split: SplitDefinition, source: z.object({ revision: z.string().min(1).max(200), repository: z.string().max(500).optional(), dirty: z.boolean() }).nullable().default(null) });
+// Cross-validation runs over the training partition only; validation and test stay untouched for later scoring.
+export const CvSpec = z.object({ strategy: z.enum(["kfold", "stratified_kfold"]), folds: z.int().min(2).max(20) });
+export const EvaluationSpec = z.object({ metrics: z.array(Name).min(1).max(10).refine(x => new Set(x).size === x.length, "Duplicate metrics").optional(), cv: CvSpec.optional() });
+export const TrainingSpec = z.object({ datasetVersionId: Id, featurePipelineId: Id, backend: Name, algorithm: Name, hyperparameters: JsonObject.default({}), seed: z.int().min(0).max(4_294_967_295), split: SplitDefinition, evaluation: EvaluationSpec.default({}), source: z.object({ revision: z.string().min(1).max(200), repository: z.string().max(500).optional(), dirty: z.boolean() }).nullable().default(null) });
 export const TrainingSnapshot = TrainingSpec.extend({ dataset: DatasetVersion, pipeline: FeaturePipeline });
 export const TRAINING_STATES = ["QUEUED", "PREPARING", "TRAINING", "EVALUATING", "SAVING", "COMPLETED", "FAILED", "CANCELLED"] as const;
 export type TrainingState = typeof TRAINING_STATES[number];
@@ -33,7 +37,9 @@ const trainingEdges: Record<TrainingState, TrainingState[]> = { QUEUED: ["PREPAR
 const modelEdges: Record<ModelState, ModelState[]> = { REGISTERED: ["READY", "REJECTED"], READY: ["RETIRED"], RETIRED: [], REJECTED: [] };
 export function assertTrainingTransition(from: TrainingState, to: TrainingState): void { if (!trainingEdges[from].includes(to)) throw new ConflictError(`Invalid training transition: ${from} -> ${to}`); }
 export function assertModelTransition(from: ModelState, to: ModelState): void { if (!modelEdges[from].includes(to)) throw new ConflictError(`Invalid model transition: ${from} -> ${to}`); }
-export const Metric = z.object({ id: Id, name: Name, partition: z.enum(["train", "validation", "test"]), value: z.number().finite(), direction: z.enum(["higher", "lower"]) });
+// partition "cv" is the across-fold mean (with std); "cv_fold" is one fold's validation score.
+export const Metric = z.object({ id: Id, name: Name, partition: z.enum(["train", "validation", "test", "cv", "cv_fold"]), value: z.number().finite(), direction: z.enum(["higher", "lower"]), fold: z.int().nonnegative().nullish(), std: z.number().finite().nonnegative().nullish() });
+export function assertMetricShape(m: MetricValue): void { if ((m.partition === "cv_fold") !== (m.fold != null)) throw new ConflictError("Only cv_fold metrics carry a fold"); }
 export const Experiment = Identity.extend({ name: Name });
 export const TrainingJob = Identity.extend({ runId: Id, experimentId: Id, snapshot: TrainingSnapshot, status: z.enum(TRAINING_STATES) });
 export const TrainingRun = Identity.extend({ jobId: Id, attempt: z.int().positive(), snapshot: TrainingSnapshot, environment: JsonObject, splitIndices: z.record(z.string(), z.array(z.int().nonnegative())), startedAt: z.iso.datetime(), endedAt: z.iso.datetime().nullable(), status: z.enum(TRAINING_STATES), metrics: z.array(Metric), failure: JsonObject.nullable(), artifactIds: z.array(Id) });
@@ -48,6 +54,12 @@ export type Snapshot = z.infer<typeof TrainingSnapshot>;
 export type Row = z.infer<typeof Rows>[number];
 export type ArtifactReference = z.infer<typeof ArtifactReferenceSchema>;
 export type MetricValue = Omit<z.infer<typeof Metric>, "id">;
+export type CvSpecType = z.infer<typeof CvSpec>;
+/** Two attempts are a fair cohort only if everything except the estimator and its hyperparameters matches. */
+export function cohortKey(raw: unknown, indices: unknown): string {
+  const s = TrainingSnapshot.parse(raw);
+  return canonicalJsonHash({ dataset: s.dataset.content.sha256, schema: s.dataset.schema, pipeline: s.pipeline.definition, split: { ...s.split, id: null }, seed: s.seed, cv: s.evaluation.cv ?? null, indices });
+}
 
 export function validateRows(schema: DatasetSchemaType, raw: unknown, prediction = false): Row[] {
   const rows = Rows.parse(raw); const columns = schema.columns.filter(c => !prediction || c.name !== schema.target);
@@ -69,9 +81,9 @@ export function validateSnapshot(snapshot: Snapshot): void {
 
 export function compareMetrics(baseline: MetricValue[], candidate: MetricValue[]) {
   return baseline.map(b => {
-    const c = candidate.find(c => c.name === b.name && c.partition === b.partition);
+    const c = candidate.find(c => c.name === b.name && c.partition === b.partition && (c.fold ?? null) === (b.fold ?? null));
     if (!c || c.direction !== b.direction) throw new ConflictError(`Missing compatible metric: ${b.partition}/${b.name}`);
     const delta = c.value - b.value;
-    return { name: b.name, partition: b.partition, baseline: b.value, candidate: c.value, delta, regressed: b.direction === "higher" ? delta < 0 : delta > 0 };
+    return { name: b.name, partition: b.partition, fold: b.fold ?? null, baseline: b.value, candidate: c.value, delta, regressed: b.direction === "higher" ? delta < 0 : delta > 0 };
   });
 }

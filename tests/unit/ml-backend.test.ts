@@ -25,7 +25,7 @@ it.runIf(Boolean(process.env.ML_TEST_PYTHON))("trains, reloads, evaluates and pr
   expect(await backend.prepare(s, rows, signal)).toEqual(prepared);
   expect(new Set(Object.values(prepared.indices).flat()).size).toBe(rows.length);
   const model = await backend.train(s, rows, prepared, signal);
-  const fittedMean = Number(execFileSync(process.env.ML_TEST_PYTHON!, ["-c", "import pickle,sys; print(pickle.loads(sys.stdin.buffer.read())['pipeline'].steps[0][1].mean_[0])"], { input: model.bytes, windowsHide: true }).toString().trim());
+  const fittedMean = Number(execFileSync(process.env.ML_TEST_PYTHON!, ["-c", "import pickle,sys; print(pickle.loads(sys.stdin.buffer.read())['pipeline'][0].named_transformers_['numeric'][0].mean_[0])"], { input: model.bytes, windowsHide: true }).toString().trim());
   expect(fittedMean).toBeCloseTo(prepared.indices.train.reduce((sum, i) => sum + rows[i]!.x, 0) / prepared.indices.train.length, 12);
   const metrics = await backend.evaluate(s, rows, prepared, model, signal);
   expect(metrics).toHaveLength(6); expect(metrics.find(m => m.name === "mae" && m.partition === "test")!.value).toBeLessThan(2);
