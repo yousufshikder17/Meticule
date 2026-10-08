@@ -1,6 +1,7 @@
 import type pg from "pg";
 import type { ArtifactStore, MlBackend } from "./backend.js";
 import { validateRows } from "./domain.js";
+import { MlExperimentService } from "./experiments.js";
 import { MlTrainingService } from "./persistence.js";
 
 /** CV folds must exactly partition the training indices: the leakage boundary the backend is trusted to honour. */
@@ -43,6 +44,10 @@ export class TrainingProcessor {
       await service.finish(runId, workerId, attempt.id, snapshot, metrics, content, model.format, Date.now() - started);
     } catch (error) {
       await service.fail(runId, workerId, attemptId, error instanceof Error ? error.message.slice(0, 500) : "Training failed");
-    } finally { clearInterval(guard); controller.abort(); }
+    } finally {
+      clearInterval(guard); controller.abort();
+      // A terminal job may complete a benchmark/search/AutoML experiment; failure here must never affect the job.
+      await new MlExperimentService(this.pool, this.artifacts, this.backends).onJobTerminal(runId);
+    }
   }
 }

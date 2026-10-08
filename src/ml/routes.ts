@@ -9,6 +9,7 @@ import { PostgresArtifactStore } from "./artifact-store.js";
 import { mlConfiguration } from "./configuration.js";
 import { MlTrainingService, QueueTraining, authorizeMl } from "./persistence.js";
 import { MlModelService, ModelTransitionInput } from "./model-service.js";
+import { registerExperimentRoutes } from "./experiment-routes.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlConfiguration()): void {
@@ -64,6 +65,7 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlCon
     const record = await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).predict(c.get("principal"), id(c.req.param("id")), z.object({ rows: z.unknown() }).parse(await c.req.json()).rows, c.req.raw.signal);
     return c.json(record, record.status === "FAILED" ? 422 : 200);
   });
+  registerExperimentRoutes(app, ml);
   app.get("/ml/endpoints/:id/predictions", async c => {
     const p = c.get("principal"); authorizeMl(p);
     return c.json((await c.get("database").query("SELECT * FROM ml_predictions WHERE tenant_id=$1 AND endpoint_id=$2 ORDER BY created_at DESC,id LIMIT 100", [p.tenantId, id(c.req.param("id"))])).rows);
