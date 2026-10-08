@@ -30,7 +30,7 @@ describe("public authorization, tenancy and surface for ML experiments", () => {
     const make = (enabled: boolean) => createApp(pool, new JwtAuthenticator(pool, secret, issuer, audience), null, null, null, undefined, null, { enabled, backends: enabled ? backends : new Map() });
     const app = make(true);
     const call = async (path: string, token: string, body?: unknown) => app.request(path, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    const tokens = { admin: await jwt(admin), member: await jwt(admin, []), privateRole: await jwt(admin, ["ml_manager"]), other: await jwt(outsider) };
+    const tokens = { admin: await jwt(admin), member: await jwt(admin, []), privateRole: await jwt(admin, ["ml_operator"]), other: await jwt(outsider) };
     const benchmark = { name: "api benchmark", datasetVersionId: dataset.id, featurePipelineId: pipeline.id, taskType: "classification", seed: 1, evaluation: { primaryMetric: "f1", cv: { strategy: "stratified_kfold", folds: 3 } }, candidates: [{ algorithm: "logistic_regression" }, { algorithm: "svc" }] };
     const search = { name: "api search", datasetVersionId: dataset.id, featurePipelineId: pipeline.id, taskType: "classification", seed: 1, algorithm: "random_forest_classifier", strategy: "grid", maxCandidates: 4, space: { max_depth: { type: "choice", values: [3, 6] } }, evaluation: { primaryMetric: "f1" } };
     const automl = { name: "api auto", datasetVersionId: dataset.id, target: "label", taskType: "classification", metric: "f1", seed: 1, budget: { maxCandidateRuns: 4, maxSearchCandidatesPerModel: 1 } };
