@@ -91,3 +91,81 @@ One existing public V1 test inspected the pickled fitted scaler by position (`st
 - Phase 1 regression: all 14 V1 ML integration tests and the five V1 backend tests pass; a real V1 runner artifact is served by the Phase 2 runner.
 - Package inspection: no private role, hosted, or environment content; ML Python files and migrations are the only additions. `ml/__pycache__` can appear in the tarball after local runs (gitignored; delete before `npm pack`).
 
+# ML Phase 3 (3A–3F) public port review
+
+Ported from private revision `cc837e8`: Phases 3A–3F, the five independent-audit corrections (`cb4c086`, `6734635`, `d9778cd`, `2a5e443`, `cc837e8`) and the conformance hardening. The public base was `a9ce951`. No private commit was cherry-picked. Shared files were three-way merged against the private pre-Phase-3 revision `c43f226`, which the public Phase 2 code matched apart from its public adaptations. Every conflict was resolved by hand, and every clean merge was re-read for private names. New files were adapted to public paths, storage and authorization. The private repository was read-only throughout.
+
+Uncommitted local work found in this checkout (an endpoint-monitoring change to `docs/ml.md`, `src/ml/model-service.ts`, `src/ml/routes.ts` and `tests/integration/ml.test.ts`) was not part of the port. It was backed up, set aside before porting and restored unchanged afterwards. It is not included in any port commit.
+
+## Classification
+
+| Capability | Classification | Public disposition |
+| --- | --- | --- |
+| ML Backend Contract v1: version, envelope, capability model, failure taxonomy, shared runner | PUBLIC-CORE | Ported (`src/ml/contract.ts`, `runner-process.ts`, `runner-backend.ts`, `ml/ml_runtime_common.py`) |
+| PyTorch backend, CPU and explicit CUDA, mixed precision | PUBLIC-CORE | Ported (`ml/pytorch_runner.py`, `src/ml/pytorch-*.ts`, `ml/requirements-pytorch.txt`) |
+| TensorFlow/Keras CPU backend | PUBLIC-CORE | Ported (`ml/tensorflow_runner.py`, `src/ml/tensorflow-*.ts`, `ml/requirements-tensorflow.txt`) |
+| Shared neural models, preprocessing and limits | PUBLIC-CORE | Ported (`src/ml/neural-*.ts`, `ml/neural_common.py`) |
+| Iterative training, durable checkpoints and resume, early stopping, best-epoch export | PUBLIC-CORE | Ported (`training-policy.ts`, processor, persistence) |
+| Per-candidate backends in benchmarks and searches; catalog availability | PUBLIC-CORE | Ported |
+| Backend conformance suite and cross-framework matrix | PUBLIC-CORE | Ported, run against public storage and authorization |
+| Artifact and checkpoint storage | PUBLIC-ADAPTATION | Kept the PostgreSQL `ml_blobs` store (16 MB per blob). Oversized blobs now fail as `output_limit_exceeded` with a message naming the limit |
+| Training and checkpoint persistence | PUBLIC-ADAPTATION | Public `fail()` keeps its stale-attempt guard and now records a category and a safe message |
+| Authorization and RLS | PUBLIC-ADAPTATION | `tenant_admin` writes, authenticated tenant reads; new tables use the existing `durable_agent_api` RLS policy |
+| Migration `006_ml_durable_training` | PUBLIC-ADAPTATION | Additive; depends only on objects the public chain already provides |
+| Runner file names | PUBLIC-ADAPTATION | Public `ml/*_runner.py` names; docs and tests use them |
+| Private roles `ml_manager` and `ml_viewer`, filesystem artifact store, `ML_ARTIFACT_ROOT` | PRIVATE-ONLY | Not used |
+| Private monitoring endpoint and operational settings | PRIVATE-ONLY | Not ported (the restored local monitoring work is separate) |
+| Managed GPU fleets, distributed or remote execution, managed serving, enterprise governance, proprietary strategies | PRIVATE-ONLY | Not present in the private Phase 3 code either; nothing to exclude |
+
+No ambiguous component was found. Phase 3 contains no commercially sensitive scheduling, serving or governance logic.
+
+## Audit corrections
+
+| Private commit | Public behaviour | Public evidence |
+| --- | --- | --- |
+| `cb4c086` | Persisted failures carry only Meticule-written text | Integration test with a backend error naming a server path. The original test deleted a file, but public blobs are append-only, so the invariant is tested directly. Checked by mutation |
+| `6734635` | Resumed PyTorch chunks reapply determinism settings | `check_checkpoints.py`: `restored_run_enforces_determinism` (19 checks) |
+| `d9778cd` | Undeclared checkpoint formats refused; corrupt checkpoints are `invalid_checkpoint` | Durable integration tests. Corruption is applied beneath the append-only blob table and caught by the store's hash |
+| `2a5e443` | A worker whose lease expired before recovery cannot write progress | Durable integration test |
+| `cc837e8` | Every declared preprocessing operation and score type is verified against real output | Conformance suite. Mutations (a falsely declared operation; SVC claiming probabilities) fail it |
+
+## Verification
+
+**Baseline before the port.** Fresh PostgreSQL database (Docker Compose), migrations 001–005, all real-backend interpreters set:
+
+- unit: 23 files, 86 tests;
+- non-ML integration: 17 files, 106 tests;
+- ML integration: 5 files, 45 tests;
+- 237 tests in total, all passing;
+- `tsc --noEmit`: 22 diagnostics, all in unrelated test files.
+
+**After the port, final code, fresh database.** Migrations 001–006 applied from empty; `db:check` 6 of 6. 61 files and 438 tests passed, with none skipped:
+
+| Suite | Files | Tests |
+| --- | --- | --- |
+| Unit | 30 | 123 |
+| Non-ML integration | 17 | 106 |
+| ML integration (lifecycle, durable, devices, compatibility, CV, experiments, authorization, PyTorch, TensorFlow, Phase 3E matrix) | 10 | 76 |
+| Conformance: sklearn | 1 | 47 |
+| Conformance: PyTorch | 1 | 41 |
+| Conformance: TensorFlow | 1 | 40 |
+| Conformance: cross-backend | 1 | 5 |
+
+The production build passes. `tsc --noEmit` reports the identical 22 diagnostics and none in ML files.
+
+**Upgrade from Phase 2.** A Phase 2 database (001–005, populated by the Phase 2 suite) migrated to 006 with every ML row count unchanged, and `db:check` reported 6 of 6. In a second database, the Phase 2 code (`a9ce951`) trained a real scikit-learn model on the Phase 2 schema. After upgrading to 006, the Phase 3 code registered, promoted and served it (x = 10 predicts 21.01).
+
+**Mutation checks**, each restored afterwards. Each made its test fail:
+
+- storing raw error text;
+- an unclassified storage-limit error;
+- a neural backend declaring a preprocessing operation its runner ignores;
+- SVC claiming probabilities.
+
+**Interpreters.** The repository's own `.ml-venv` has no scikit-learn installed, so all runs used environments with the pinned requirements: Python 3.13.12, scikit-learn 1.7.2, PyTorch 2.9.1 (CPU), and TensorFlow 2.20.0 with Keras 3.15.1.
+
+**Not verified here:**
+
+- Real CUDA execution: PyTorch was a CPU build, so the CUDA checks took their explicit `device_unavailable` refusal branch.
+- The hosted GitHub Actions workflow was not run from this machine.
+- The Phase 3E matrix and the cross-backend pairs that include TensorFlow run only where all three frameworks are installed together. They passed locally and are not part of hosted CI.

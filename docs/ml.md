@@ -1,6 +1,14 @@
-# Optional classical ML (V1 lifecycle and Phase 2)
+# Machine learning: classical and neural (V1 lifecycle, Phase 2 and Phase 3)
 
-Phase 2 (model catalog, cross-validation, benchmarks, hyperparameter search, bounded AutoML, ranking, richer preprocessing and metrics, explicit artifact compatibility) is described in [Phase 2](#phase-2-models-cross-validation-and-experiments). It extends the V1 lifecycle below; nothing in V1 was replaced.
+Meticule's optional ML subsystem is a self-hosted platform for tabular machine learning. You can:
+
+- ingest versioned datasets and configure preprocessing;
+- train classical (scikit-learn) and neural (PyTorch, TensorFlow/Keras) models;
+- run cross-validation, benchmarks, bounded hyperparameter search and AutoML;
+- resume interrupted neural training from durable checkpoints;
+- register and promote model versions, and serve version-pinned inference.
+
+Phase 2 (model catalog, cross-validation, benchmarks, hyperparameter search, bounded AutoML, ranking, richer preprocessing and metrics, explicit artifact compatibility) is described in [Phase 2](#phase-2-models-cross-validation-and-experiments). [Phase 3](#phase-3-neural-networks-durable-training-and-devices) adds neural backends, durable checkpointed training, explicit CPU/CUDA devices and mixed precision, all behind [Meticule ML Backend Contract v1](ml-backend-contract.md). Each phase extends the V1 lifecycle below; nothing was replaced.
 
 ML extends Meticule's existing PostgreSQL run queue through `kind='ml'`. The agent executor, JWT authentication, tenant transactions and existing RLS boundary remain authoritative. Backend adapters compute; they never schedule work or change lifecycle state.
 
@@ -29,6 +37,8 @@ The public checkout already has tenant/auth infrastructure; this port does not i
 Publication and failure handling both check the current immutable attempt ID under the canonical run lock, including reclamation by a process using the same worker ID. Public artifact bytes live in a tenant-scoped `ml_blobs` table, addressed by SHA-256 and checked against the recorded hash and size before loading. Each blob is capped at 16 MB; larger data/checkpoints require a different storage adapter.
 
 ## Migration compatibility
+
+Migration `006_ml_durable_training` (Phase 3) is additive. It adds nullable attempt columns (`resumed_from_epoch`, `best_epoch`, `stop_reason`) and the append-only `ml_training_epochs` and `ml_training_checkpoints` tables, with tenant RLS. Existing Phase 2 rows, artifacts and endpoints are unchanged and keep working after the upgrade.
 
 Apply normal migrations before starting upgraded API/workers, and restart older workers before enabling ML. The uncommitted `002_ml.sql` precursor was never part of the released public migration chain. If it was manually applied locally, V1 migration fails explicitly rather than overwriting its incompatible tables or discarding data. Export that experimental data and migrate a fresh database; no automatic destructive conversion is performed.
 
@@ -152,7 +162,105 @@ The recorded environment is checked before any bytes are unpickled and again fro
 
 ### Limits
 
-One backend (`sklearn`); no neural networks, GPU or distributed training; no repeated CV, Bayesian or adaptive search, confusion matrix, CPU/RAM telemetry or execution-time budget; lists return the 100 newest rows. Stratified CV needs every class at least `folds` times in the training partition and `roc_auc` needs every class in each scored partition, otherwise the job fails durably. Artifacts remain capped at 16 MB in PostgreSQL.
+Classical models: no repeated CV, Bayesian or adaptive search, confusion matrix, CPU/RAM telemetry or execution-time budget; lists return the 100 newest rows. Stratified CV needs every class at least `folds` times in the training partition and `roc_auc` needs every class in each scored partition, otherwise the job fails durably. Artifacts remain capped at 16 MB in PostgreSQL.
+
+## Phase 3: neural networks, durable training and devices
+
+Phase 3 adds neural networks as further implementations of the same lifecycle. A neural job is an ordinary training job: one `kind='ml'` run with the same leases, attempts, cancellation, artifacts, registry, inference and tenant isolation as a classical one. Every backend implements [Meticule ML Backend Contract v1](ml-backend-contract.md), which owns the backend boundary, the failure taxonomy and the conformance suite.
+
+### Backends
+
+| Backend | Enable | Interpreter and requirements | Devices | Precision | Training |
+| --- | --- | --- | --- | --- | --- |
+| `sklearn` | `ML_ENABLED=true` | `ML_PYTHON`, `ml/requirements.txt` | CPU | fp32 | One fit per attempt |
+| `pytorch` | also `ML_PYTORCH_ENABLED=true` | `ML_PYTORCH_PYTHON`, `ml/requirements-pytorch.txt` | CPU; CUDA when explicitly requested | fp32; mixed on CUDA | Durable chunks |
+| `tensorflow` | also `ML_TENSORFLOW_ENABLED=true` | `ML_TENSORFLOW_PYTHON`, `ml/requirements-tensorflow.txt` | CPU | fp32 | Durable chunks |
+
+Each framework runs in its own interpreter with its own pinned requirements, so installing one never changes another. `GET /ml/models` lists every model with `available` set when this deployment has its backend configured.
+
+The neural backends register `mlp_classifier` and `mlp_regressor`: bounded feed-forward networks for tabular data. Hyperparameters are allowlisted and bounded:
+
+- `hiddenLayers`: 1 to 4 layers, each 1 to 256 units, at most 512 units in total;
+- `activation`: `relu`, `gelu` or `tanh`;
+- `dropout`: 0 to 0.8;
+- `epochs`: 1 to 200; `batchSize`: 1 to 256; `learningRate`;
+- `optimizer`: `sgd`, `adam` or `adamw`;
+- `loss`: `cross_entropy` for classification; `mse` or `l1` for regression.
+
+Neural pipelines may use `impute_median`, `impute_mean`, `standard_scale`, `min_max_scale`, `impute_most_frequent`, `one_hot_encode` and `ordinal_encode`. Preprocessing is fitted on training rows only and saved with the model as plain data. Cross-validation trains a fresh network for every fold.
+
+### Training policy
+
+Iterative models take an optional `spec.training` policy:
+
+```json
+{ "checkpointEveryEpochs": 2, "earlyStopping": { "patience": 3, "minDelta": 0 }, "device": "cpu", "precision": "fp32" }
+```
+
+- `checkpointEveryEpochs` (1 to 50, default 5) sets the bounded chunk size. Early stopping forces one epoch per chunk, so a stop decision never trains past the epoch that made it.
+- `earlyStopping` monitors validation loss, needs a validation partition, and exports the best epoch's weights.
+- `device` is `cpu` (the default) or `cuda`. CUDA is never chosen silently. A CUDA request on a runtime without CUDA fails as `device_unavailable`. On TensorFlow it is refused before any runner starts. Nothing ever falls back to CPU.
+- `precision` is `fp32` (the default) or `mixed`. Mixed precision requires `device: "cuda"`.
+
+A classical model refuses a training policy explicitly.
+
+### Durable training and resume
+
+Meticule owns the epoch loop; the framework only computes. Each chunk's epoch summaries and its checkpoint are written in one transaction under the worker's lease, so a crash leaves the whole chunk or none of it. A worker whose lease has expired cannot write progress, even before recovery has requeued the job.
+
+When a lease is lost, recovery starts a new attempt that resumes from the job's newest checkpoint:
+
+- the resumed attempt must reproduce the exact split the checkpoint was trained on;
+- the checkpoint must match the training configuration (algorithm, hyperparameters, seed, precision, pipeline and split);
+- a checkpoint in a format the backend does not declare is refused as `incompatible_checkpoint` before its bytes are read;
+- corrupt checkpoint bytes are `invalid_checkpoint`.
+
+A refused or corrupt checkpoint fails the attempt; it never silently restarts training. Early stopping is replayed from persisted epochs, so a resumed attempt decides as an uninterrupted one would. Cancellation is never promoted to completion. Attempts record `resumed_from_epoch`, `best_epoch` and `stop_reason`, and epoch summaries are stored in `ml_training_epochs`.
+
+Checkpoints hold the model and optimizer state, the shuffling and framework random-number state, the best-epoch weights and, under mixed precision, the gradient scaler. PyTorch checkpoints are CPU tensors loaded with `weights_only=True`, so a checkpoint written on CUDA resumes on CPU. TensorFlow checkpoints are NumPy archives read with `allow_pickle=False`.
+
+### Devices and provenance
+
+Each attempt records the requested and actual device, the CUDA runtime, the device name and the precision. These are provenance, not compatibility: an artifact trained on CUDA serves on CPU. CUDA needs a CUDA-enabled PyTorch build in `ML_PYTORCH_PYTHON`. Deterministic algorithms are enforced for every chunk, including resumed ones. On CPU, chunked and resumed training reproduces an uninterrupted run exactly. Real-GPU determinism has not been verified in this project's environment.
+
+### Failures
+
+A failed attempt records `{ code: "ml_training_failed", category, message }`, and a failed prediction records `{ code: "ml_prediction_failed", category, message }`. `category` is one of the contract's bounded categories, for example `device_unavailable`, `incompatible_checkpoint` or `output_limit_exceeded`. Messages are written by Meticule. Framework exceptions, stderr, stack traces and server paths are never stored or returned.
+
+### Storage
+
+Model artifacts and training checkpoints are tenant-scoped blobs in PostgreSQL, like datasets, and each is capped at 16 MB. A neural checkpoint holds the weights, the optimizer state and the best-epoch weights. A very wide encoded input (roughly 3,000 or more columns at the maximum first-layer width) can therefore exceed the cap. The job then fails as `output_limit_exceeded` with a message naming the limit; nothing is truncated.
+
+### Comparing classical and neural models
+
+A benchmark or search candidate may name its own `backend`, so classical and neural models compete on one dataset version, split, fold set, seed and metric definition. Ranking uses the same validation or CV objective for every framework, never test data.
+
+```json
+{ "candidates": [ { "algorithm": "logistic_regression" },
+                  { "algorithm": "mlp_classifier", "backend": "pytorch", "label": "pytorch mlp", "hyperparameters": { "hiddenLayers": [16], "epochs": 20 } },
+                  { "algorithm": "mlp_classifier", "backend": "tensorflow", "label": "tensorflow mlp", "hyperparameters": { "hiddenLayers": [16], "epochs": 20 } } ] }
+```
+
+### Enable the neural backends
+
+```powershell
+python -m venv .tmp/torch-venv
+.tmp/torch-venv/Scripts/python.exe -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.9.1"
+.tmp/torch-venv/Scripts/python.exe -m pip install -r ml/requirements-pytorch.txt
+python -m venv .tmp/tf-venv
+.tmp/tf-venv/Scripts/python.exe -m pip install -r ml/requirements-tensorflow.txt
+$env:ML_PYTORCH_ENABLED='true'; $env:ML_PYTORCH_PYTHON=(Resolve-Path .tmp/torch-venv/Scripts/python.exe).Path
+$env:ML_TENSORFLOW_ENABLED='true'; $env:ML_TENSORFLOW_PYTHON=(Resolve-Path .tmp/tf-venv/Scripts/python.exe).Path
+```
+
+For CUDA, install a CUDA build of the same PyTorch version instead of the CPU wheel. Native Windows TensorFlow has no CUDA build, and the TensorFlow backend is CPU-only on every platform.
+
+### Phase 3 limits
+
+- Neural models are bounded feed-forward networks for tabular data. Text, image, audio and time-series models are not supported.
+- There is no distributed or multi-GPU training, GPU scheduling or managed serving.
+- Real CUDA execution is not exercised in CI.
+- A neural chunk runs in a fresh runner process, which costs interpreter start-up time per chunk.
 
 ## Public API
 
@@ -222,10 +330,19 @@ $env:ML_TEST_PYTHON=(Resolve-Path .tmp/ml-venv/Scripts/python.exe).Path
 npm run test:integration
 ```
 
-Real backend checks run when `ML_TEST_PYTHON` is set; normal unit tests need no Python. The GitHub Actions workflow installs Python 3.13 and the pinned `ml/requirements.txt` and always sets it, and a CI-only test fails the job if it is missing, so the real runner is exercised on every push and pull request (a local run without the variable skips those tests). Tests cover PostgreSQL storage, JWT/RLS, attempts, cancellation/recovery, stale workers, atomic publication, all fifteen models, preprocessing, K-fold and stratified K-fold, fold-local fitting and leakage, reproducibility, benchmark/search/AutoML planning and execution, ranking direction and tie-breaks, partial failure, concurrency, artifact compatibility with a real V1 artifact, registry/version pins, inference schema errors, failed predictions, comparison, public authorization and tenant isolation, and migration safety. Existing integration tests are rerun to check agent behavior.
+Real backend checks run when `ML_TEST_PYTHON` is set, and for the neural backends when `ML_TEST_PYTORCH_PYTHON` and `ML_TEST_TENSORFLOW_PYTHON` are set. The backend conformance suite in `tests/conformance` runs each configured backend against the contract, including every preprocessing operation and score type it declares. `tests/integration/ml-matrix.test.ts` compares all three frameworks on identical splits and folds; normal unit tests need no Python. The GitHub Actions workflow installs Python 3.13 and the pinned `ml/requirements.txt` and always sets it, and a CI-only test fails the job if it is missing, so the real runner is exercised on every push and pull request (a local run without the variable skips those tests). Tests cover PostgreSQL storage, JWT/RLS, attempts, cancellation/recovery, stale workers, atomic publication, all fifteen models, preprocessing, K-fold and stratified K-fold, fold-local fitting and leakage, reproducibility, benchmark/search/AutoML planning and execution, ranking direction and tie-breaks, partial failure, concurrency, artifact compatibility with a real V1 artifact, registry/version pins, inference schema errors, failed predictions, comparison, public authorization and tenant isolation, and migration safety. Existing integration tests are rerun to check agent behavior.
 
 ## Deferred scope
 
-Other framework adapters (including XGBoost/LightGBM), richer data formats, streaming/large artifacts, resumable backend checkpoints, high-throughput serving, GPU scheduling, repeated CV, Bayesian or multi-stage AutoML, distributed training, fine-tuning and drift monitoring are deferred.
+Deferred:
+
+- other framework adapters, including XGBoost and LightGBM;
+- non-tabular data (text, images, audio, time series) and richer data formats;
+- streaming or large artifacts beyond the 16 MB blob cap, and signed artifacts;
+- high-throughput serving and GPU scheduling;
+- repeated CV, and Bayesian or multi-stage AutoML;
+- distributed or remote training, fine-tuning and drift monitoring.
+
+A public plugin SDK for third-party backends is not offered; the backend contract is internal.
 
 Synchronous inference commits its outcome with the HTTP tenant transaction; terminated requests are not resumable inference jobs. Standalone callers can leave PENDING evidence after a crash. Successful training usage records measure wall time with zero token/cost counts; failed/recovered attempts remain in history, not estimated billing. Blob retention/GC and pagination remain deferred.

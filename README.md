@@ -48,9 +48,18 @@ $env:OLLAMA_EMBEDDING_DIMENSIONS='384'
 npm run verify:rag
 ```
 
-## Optional classical ML
+## Optional machine learning (classical and neural)
 
-ML V1 supports versioned datasets/pipelines, durable training and evaluation, reproducible experiment records, explicit registration/promotion, version-pinned inference and regression comparison. It reuses the leased runtime and stores bounded artifacts in PostgreSQL. ML is disabled by default; see [ML setup and APIs](docs/ml.md) for the isolated scikit-learn backend.
+Meticule includes an optional, self-hosted ML platform for tabular data. Its lifecycle covers:
+
+- versioned datasets and preprocessing pipelines;
+- durable training and evaluation with cross-validation;
+- benchmarks, bounded hyperparameter search and AutoML;
+- explicit model registration, promotion and rollback, and version-pinned inference.
+
+Classical models run on scikit-learn. Neural networks run on PyTorch (CPU, or CUDA when explicitly requested, with optional mixed precision) and TensorFlow/Keras (CPU). Neural training runs in durable, checkpointed chunks that resume after a worker is lost. Everything reuses the leased run queue, tenant isolation and PostgreSQL-backed artifact storage. Each framework runs in its own isolated Python environment behind a versioned internal backend contract with a conformance suite.
+
+ML is disabled by default; see [ML setup and APIs](docs/ml.md) and the [backend contract](docs/ml-backend-contract.md).
 
 ## Controlled connectors
 
