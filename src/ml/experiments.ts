@@ -29,7 +29,8 @@ export const BaseInput = z.object({
   seed: z.int().min(0).max(4_294_967_295), split: SplitInput.default({ train: .6, validation: .2, test: .2 }), evaluation: EvaluationInput, source: Source,
 });
 export const BenchmarkInput = BaseInput.extend({
-  candidates: z.array(z.object({ algorithm: Name, hyperparameters: JsonObject.default({}), label: Name.optional() })).min(2).max(20),
+  // Candidates may name their own backend, so a classical and a neural model can compete on identical data and split.
+  candidates: z.array(z.object({ algorithm: Name, backend: Name.optional(), hyperparameters: JsonObject.default({}), label: Name.optional() })).min(2).max(20),
 });
 export const SearchInput = BaseInput.extend({
   algorithm: Name, fixedHyperparameters: JsonObject.default({}), space: SearchSpace, strategy: z.enum(["grid", "random"]), maxCandidates: z.int().min(1).max(50),
@@ -37,7 +38,7 @@ export const SearchInput = BaseInput.extend({
 
 /** What every candidate of one experiment shares; only algorithm and hyperparameters vary. */
 export interface SharedSettings { datasetVersionId: string; featurePipelineId: string; backend: string; taskType: TaskType; seed: number; split: z.infer<typeof SplitInput>; evaluation: z.infer<typeof EvaluationInput>; source: z.infer<typeof Source> }
-export interface CandidatePlan { label: string; algorithm: string; hyperparameters: Record<string, unknown>; origin: "listed" | "search" | "default" }
+export interface CandidatePlan { label: string; algorithm: string; hyperparameters: Record<string, unknown>; origin: "listed" | "search" | "default"; backend?: string | undefined }
 export interface Plan { kind: OrchestrationKind; parentId: string | null; experimentId: string; name: string; config: unknown; ranking: RankingConfigType; idempotencyKey: string | null; shared: SharedSettings; candidates: CandidatePlan[] }
 interface Row { [column: string]: any }
 
@@ -51,7 +52,7 @@ export class MlExperimentService {
     authorizeMl(principal, true); const input = BenchmarkInput.parse(raw);
     const labels = input.candidates.map(c => c.label ?? c.algorithm);
     if (new Set(labels).size !== labels.length) throw new ConflictError("Candidate labels must be unique; set `label` to compare one algorithm several times");
-    const candidates = input.candidates.map((c, i): CandidatePlan => ({ label: labels[i]!, algorithm: c.algorithm, hyperparameters: c.hyperparameters, origin: "listed" }));
+    const candidates = input.candidates.map((c, i): CandidatePlan => ({ label: labels[i]!, algorithm: c.algorithm, hyperparameters: c.hyperparameters, origin: "listed", backend: c.backend ?? input.backend }));
     return this.create(principal, "benchmark", input, { candidates: input.candidates }, candidates);
   }
 
@@ -123,7 +124,6 @@ export class MlExperimentService {
   /** Shared by every kind: validate each candidate against the catalog and backend, then queue ordinary jobs. */
   async insert(c: pg.PoolClient, principal: Principal, plan: Plan, configHash: string): Promise<string> {
     const { shared } = plan;
-    const backend = this.backends.get(shared.backend); if (!backend) throw new ConflictError("Requested ML backend is not configured");
     const dataset = await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, shared.datasetVersionId]);
     const pipeline = await c.query("SELECT document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [principal.tenantId, shared.featurePipelineId]);
     if (!dataset.rowCount || !pipeline.rowCount) throw new NotFoundError("Dataset version or pipeline not found");
@@ -135,10 +135,12 @@ export class MlExperimentService {
     if (new Set(metrics).size !== metrics.length) throw new ConflictError("Primary and secondary metrics must be distinct");
     const split = { id: randomUUID(), strategy: "random" as const, ...shared.split, stratify: shared.split.stratify ?? shared.taskType === "classification" };
     const specs = plan.candidates.map(candidate => {
-      const model = getModel(shared.backend, candidate.algorithm);
+      const backendId = candidate.backend ?? shared.backend;
+      const backend = this.backends.get(backendId); if (!backend) throw new ConflictError(`Requested ML backend is not configured: ${backendId}`);
+      const model = getModel(backendId, candidate.algorithm);
       if (model.taskType !== shared.taskType) throw new ConflictError(`${candidate.algorithm} is a ${model.taskType} model`);
       assertMetricsSupported(model, metrics);
-      const spec = { datasetVersionId: shared.datasetVersionId, featurePipelineId: shared.featurePipelineId, backend: shared.backend, algorithm: candidate.algorithm, hyperparameters: validateHyperparameters(model, candidate.hyperparameters) as Record<string, never>, seed: shared.seed, split, evaluation: { metrics, ...(shared.evaluation.cv ? { cv: shared.evaluation.cv } : {}) }, source: shared.source };
+      const spec = { datasetVersionId: shared.datasetVersionId, featurePipelineId: shared.featurePipelineId, backend: backendId, algorithm: candidate.algorithm, hyperparameters: validateHyperparameters(model, candidate.hyperparameters) as Record<string, never>, seed: shared.seed, split, evaluation: { metrics, ...(shared.evaluation.cv ? { cv: shared.evaluation.cv } : {}) }, source: shared.source };
       backend.validate(TrainingSnapshot.parse({ ...spec, dataset: dataset.rows[0].document, pipeline: pipeline.rows[0].document }));
       return spec;
     });

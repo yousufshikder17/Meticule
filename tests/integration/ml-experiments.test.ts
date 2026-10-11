@@ -143,7 +143,7 @@ describe("benchmark experiments", () => {
     const f = await fixture(); const app = new Hono<{ Variables: { principal: Principal; database: pg.Pool; correlationId: string } }>();
     app.use("*", async (c, next) => { c.set("principal", manager); c.set("database", pool); await next(); });
     registerMlRoutes(app, { enabled: true, backends: f.backends });
-    const catalog = await (await app.request("/ml/models")).json(); expect(catalog.models).toHaveLength(15); expect(catalog.metrics.f1.direction).toBe("higher");
+    const catalog = await (await app.request("/ml/models")).json(); expect(catalog.models.filter((m: { backend: string }) => m.backend === "sklearn")).toHaveLength(15); expect(catalog.models.find((m: { id: string }) => m.id === "mlp_classifier")).toMatchObject({ backend: "pytorch", available: false, capabilities: { iterative: true } }); expect(catalog.metrics.f1.direction).toBe("higher");
     const post = await app.request("/ml/benchmarks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input(f.dataset, f.pipeline)) });
     expect(post.status).toBe(202); const created = await post.json(); await f.drain();
     const got = await (await app.request(`/ml/benchmarks/${created.orchestration.id}`)).json(); expect(got.orchestration.status).toBe("COMPLETED");

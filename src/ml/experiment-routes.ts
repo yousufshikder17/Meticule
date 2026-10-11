@@ -16,7 +16,8 @@ const KINDS: [string, OrchestrationKind][] = [["benchmarks", "benchmark"], ["sea
 export function registerExperimentRoutes(app: Hono<{ Variables: Variables }>, ml: { backends: ReadonlyMap<string, MlBackend> }): void {
   const id = (value: string) => z.uuid().parse(value);
   const service = (database: pg.Pool) => new MlExperimentService(database, new PostgresArtifactStore(database), ml.backends);
-  app.get("/ml/models", c => { authorizeMl(c.get("principal")); return c.json({ models: listModels().map(describeModel), metrics: METRICS }); });
+  // `available` says whether this deployment has the model's backend configured; the catalog itself is always listed.
+  app.get("/ml/models", c => { authorizeMl(c.get("principal")); return c.json({ models: listModels().map(m => ({ ...describeModel(m), available: ml.backends.has(m.backend) })), metrics: METRICS }); });
   for (const [path, kind] of KINDS) {
     app.get(`/ml/${path}`, async c => c.json(await service(c.get("database")).list(c.get("principal"), kind)));
     app.post(`/ml/${path}`, async c => {

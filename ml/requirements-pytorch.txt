@@ -1,0 +1,4 @@
+# PyTorch CPU backend (Phase 3A). Kept separate from the sklearn backend: install only where PyTorch models run.
+# torch comes from the CPU wheel index (download.pytorch.org/whl/cpu); the pin matches a local +cpu build.
+-r requirements.txt
+torch==2.9.1
