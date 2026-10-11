@@ -61,6 +61,7 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlCon
   app.post("/ml/model-versions/:id/transition", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).transition(c.get("principal"), id(c.req.param("id")), ModelTransitionInput.parse(await c.req.json()).status)));
   app.post("/ml/endpoints", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).endpoint(c.get("principal"), await c.req.json()), 201));
   app.post("/ml/endpoints/:id/disable", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).disableEndpoint(c.get("principal"), id(c.req.param("id")))));
+  app.get("/ml/endpoints/:id/monitoring", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).monitoring(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/endpoints/:id/predict", async c => {
     const record = await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).predict(c.get("principal"), id(c.req.param("id")), z.object({ rows: z.unknown() }).parse(await c.req.json()).rows, c.req.raw.signal);
     return c.json(record, record.status === "FAILED" ? 422 : 200);

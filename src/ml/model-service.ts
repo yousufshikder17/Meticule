@@ -64,6 +64,25 @@ export class MlModelService {
       await audit(c, principal.tenantId, principal.userId, "ml.endpoint_disabled", { endpointId: id }); return e.rows[0];
     });
   }
+  async monitoring(principal: Principal, endpointId: string) {
+    authorizeMl(principal);
+    const result = await this.pool.query(`SELECT e.id AS endpoint_id,e.model_version_id,e.status AS endpoint_status,
+      now()-interval '24 hours' AS window_start,now() AS window_end,
+      count(p.id)::int AS requests,coalesce(sum(p.count),0)::float8 AS rows,
+      count(p.id) FILTER (WHERE p.status='COMPLETED')::int AS completed,
+      count(p.id) FILTER (WHERE p.status='FAILED')::int AS failed,
+      count(p.id) FILTER (WHERE p.status='PENDING')::int AS pending,
+      (count(p.id) FILTER (WHERE p.status='FAILED'))::float8 /
+        NULLIF(count(p.id) FILTER (WHERE p.status IN ('COMPLETED','FAILED')),0) AS error_rate,
+      avg(p.latency_ms) FILTER (WHERE p.status IN ('COMPLETED','FAILED'))::float8 AS average_latency_ms,
+      percentile_cont(0.95) WITHIN GROUP (ORDER BY p.latency_ms)
+        FILTER (WHERE p.status IN ('COMPLETED','FAILED')) AS p95_latency_ms
+      FROM ml_endpoints e LEFT JOIN ml_predictions p ON p.tenant_id=e.tenant_id AND p.endpoint_id=e.id
+        AND p.created_at BETWEEN now()-interval '24 hours' AND now()
+      WHERE e.tenant_id=$1 AND e.id=$2 GROUP BY e.id,e.model_version_id,e.status`, [principal.tenantId, endpointId]);
+    if (!result.rowCount) throw new NotFoundError("Endpoint not found");
+    return result.rows[0];
+  }
   async predict(principal: Principal, endpointId: string, raw: unknown, signal: AbortSignal) {
     authorizeMl(principal);
     const pending = await transaction(this.pool, async c => {

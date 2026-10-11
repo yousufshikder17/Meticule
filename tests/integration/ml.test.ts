@@ -173,6 +173,28 @@ describe("durable ML subsystem", () => {
     await expect(f.models.transition(manager, version.id, "READY")).rejects.toThrow();
     await expect(pool.query("UPDATE ml_model_versions SET status='READY' WHERE id=$1", [version.id])).rejects.toThrow(/invalid ML model transition/);
   });
+  it("monitors prediction outcomes and latency within the tenant and 24-hour window", async () => {
+    const f = await fixture(); await f.worker.tick();
+    const attempt = (await f.training.getJob(manager, f.job.id)).attempts[0];
+    const registry = await f.models.registry(manager, { name: "monitored" });
+    const model = await f.models.register(manager, registry.id, { trainingRunId: attempt.id });
+    await f.models.transition(manager, model.id, "READY");
+    const endpoint = await f.models.endpoint(manager, { name: "monitored", modelVersionId: model.id });
+    const empty = await f.models.monitoring(manager, endpoint.id);
+    expect(empty.requests).toBe(0); expect(empty.error_rate).toBeNull(); expect(empty.p95_latency_ms).toBeNull();
+    const completed = await f.models.predict(manager, endpoint.id, [{ x: 10 }, { x: 20 }], new AbortController().signal);
+    f.backend.predict = async () => { throw new Error("backend unavailable"); };
+    const failed = await f.models.predict(manager, endpoint.id, [{ x: 1 }], new AbortController().signal);
+    await pool.query(`INSERT INTO ml_predictions(tenant_id,endpoint_id,model_version_id,input_hash,count,created_at)
+      VALUES($1,$2,$3,$4,1,now()),($1,$2,$3,$4,100,now()-interval '2 days')`, [manager.tenantId, endpoint.id, model.id, "a".repeat(64)]);
+    const monitoring = await withTenantSession(pool, manager.tenantId, db => new MlModelService(db, store, new Map()).monitoring(manager, endpoint.id));
+    expect(monitoring).toMatchObject({ endpoint_id: endpoint.id, model_version_id: model.id, requests: 3, rows: 4, completed: 1, failed: 1, pending: 1, error_rate: .5 });
+    expect(monitoring.average_latency_ms).toBe((Number(completed.latency_ms) + Number(failed.latency_ms)) / 2);
+    expect(monitoring.p95_latency_ms).toBeGreaterThanOrEqual(monitoring.average_latency_ms);
+    await expect(f.models.monitoring(outsider, endpoint.id)).rejects.toThrow(/not found/);
+    await f.models.transition(manager, model.id, "RETIRED");
+    expect((await f.models.monitoring(manager, endpoint.id)).endpoint_status).toBe("DISABLED");
+  });
   it("compares only reproducible cohorts and records inference failures", async () => {
     const f = await fixture(); await f.worker.tick(); const first = (await f.training.getJob(manager, f.job.id)).attempts[0];
     const second = await f.training.queue(manager, f.input); await f.worker.tick(); const other = (await f.training.getJob(manager, second.id)).attempts[0];
@@ -219,6 +241,12 @@ describe("durable ML subsystem", () => {
     expect((await request(`/ml/endpoints/${endpoint.id}/predict`, member, { rows: [{ x: "bad" }] })).status).toBe(409);
     const prediction = await request(`/ml/endpoints/${endpoint.id}/predict`, member, { rows: [{ x: 10 }] }); expect(prediction.status).toBe(200); expect((await prediction.json()).output).toEqual([21]);
     const records = await request(`/ml/endpoints/${endpoint.id}/predictions`, member); expect((await records.json()).length).toBe(1);
+    // Monitoring through the real route: authenticated tenant members read it; another tenant and malformed IDs do not.
+    expect((await app.request(`/ml/endpoints/${endpoint.id}/monitoring`)).status).toBe(401);
+    const monitored = await request(`/ml/endpoints/${endpoint.id}/monitoring`, member); expect(monitored.status).toBe(200);
+    expect(await monitored.json()).toMatchObject({ endpoint_id: endpoint.id, requests: 1, completed: 1, failed: 0, error_rate: 0 });
+    expect((await request(`/ml/endpoints/${endpoint.id}/monitoring`, other)).status).toBe(404);
+    expect((await request("/ml/endpoints/not-a-uuid/monitoring", member)).status).toBe(400);
     const disabled = createApp(pool, new JwtAuthenticator(pool, secret, issuer, audience), null, null, null, undefined, null, { enabled: false, backends: new Map() });
     expect((await disabled.request("/ml/datasets", { headers: { authorization: `Bearer ${admin}` } })).status).toBe(503);
     f.backend.predict = async () => { throw new Error("internal details"); };

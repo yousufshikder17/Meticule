@@ -27,7 +27,7 @@ Training phases: QUEUED → PREPARING → TRAINING → EVALUATING → SAVING →
 | Python runner and pinned sklearn dependencies | Port to existing `ml/` paths | Working numeric classical ML backend; remains optional |
 | ML table isolation | Adapt to existing public RLS | Public repository already ships tenancy and `durable_agent_api` |
 | Private `ml_manager`/`ml_viewer` roles | Omit | Existing `tenant_admin` authorizes mutations; authenticated tenant members read/predict |
-| Private UI, operational monitoring endpoints and deployment settings | Omit | Outside public ML V1 scope |
+| Private UI, the private operational monitoring endpoint and deployment settings | Omit | Outside public ML V1 scope. Public Meticule later added its own tenant-scoped endpoint summary (`GET /ml/endpoints/:id/monitoring`). |
 | Private tests | Adapt | Test public storage, authorization and actual HTTP/runtime behavior |
 
 All public precursor files were inspected before replacement. Useful ideas retained: workload-filtered claims, nullable agent fields only for ML, nested transactions, bounded content-addressed PostgreSQL artifacts, and a subprocess adapter with pinned dependencies. Superseded: the combined untested ML service, matrix-only schemas, the four-table experiment, permissive model state changes, alternate backend protocol and duplicate inline API routes. The precursor lacked versioned datasets/pipelines, durable attempt phases and tested publication integrity. Its source was archived locally outside this checkout before editing; it is not part of the public release.
@@ -264,7 +264,7 @@ For CUDA, install a CUDA build of the same PyTorch version instead of the CPU wh
 
 ## Public API
 
-All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are UUIDs. Version documents use camelCase; lifecycle/registry responses follow existing snake_case row conventions. Lists return at most 100 records. No UI or ML monitoring endpoint is added; Phase 2 adds only the model catalog and experiment routes below.
+All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are UUIDs. Version documents use camelCase; lifecycle/registry responses follow existing snake_case row conventions. Lists return at most 100 records. No UI is added.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
@@ -286,6 +286,7 @@ All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are
 | POST | `/ml/endpoints/:id/disable` | Disable a pinned endpoint |
 | POST | `/ml/endpoints/:id/predict` | `{rows:[...]}`; synchronous inference |
 | GET | `/ml/endpoints/:id/predictions` | Last 100 outcomes |
+| GET | `/ml/endpoints/:id/monitoring` | Last 24 hours: request/row counts, outcomes, error rate, average and p95 latency |
 | GET | `/ml/models` | Model catalog and metric registry |
 | GET/POST | `/ml/benchmarks`, `/ml/searches`, `/ml/automl` | List / create experiments (202) |
 | GET | `/ml/benchmarks/:id`, `/ml/searches/:id`, `/ml/automl/:id` | Candidates, lineage, ranking, recommendation (404 for another kind) |
@@ -293,6 +294,8 @@ All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are
 | POST | `/ml/experiments/:id/cancel` | Cancel unfinished candidates (`tenant_admin`) |
 
 Prediction batches are capped at 1,000 and must follow the original dataset schema with its target omitted. Malformed schema definitions return 400, incompatible data/inference rows 409, backend inference failures 422 with a durable FAILED record, and management-role failures 403. Retiring a version disables its endpoints atomically.
+
+Monitoring includes disabled endpoints and uses persisted prediction outcomes. Error rate excludes pending requests; latency includes completed and failed requests. Empty windows return null rates/latencies. This operational summary complements reproducible training regression comparisons; it does not measure live model accuracy or data drift without labels or input-distribution observations.
 
 Registering the same completed attempt under the same entry is idempotent; a different attempt creates the next version, initially REGISTERED. Promoting a new version never retargets old endpoints. Comparisons require identical dataset content/schema, feature definition, seed, split specification and actual row indices, with matching metric names/directions. Algorithms/hyperparameters may differ. Comparison flags never promote automatically.
 
