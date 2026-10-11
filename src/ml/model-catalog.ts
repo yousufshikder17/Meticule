@@ -3,18 +3,28 @@ import { ConflictError } from "../domain/errors.js";
 
 export type TaskType = "classification" | "regression";
 type Scalar = string | number | boolean | null;
+// Defaults may be scalars or bounded integer lists (neural-network layer widths).
+type DefaultValue = Scalar | number[];
 // One declaration drives validation, discovery and search-space checks; unknown parameters are never forwarded.
 export type ParameterSpec =
   | { kind: "int"; min: number; max: number; nullable?: boolean; default: number | null }
   | { kind: "float"; min: number; max: number; openMin?: boolean; default: number }
   | { kind: "choice"; values: readonly Scalar[]; default: Scalar }
-  | { kind: "bool"; default: boolean };
+  | { kind: "bool"; default: boolean }
+  // Bounded list of integers, e.g. hidden layer widths. Only neural definitions use it; search spaces reject it.
+  | { kind: "intList"; minItems: number; maxItems: number; min: number; max: number; default: number[] };
 export interface ModelCapabilities {
   /** Which per-class score the estimator exposes; gates roc_auc (probability|decision, binary only for decision) and log_loss (probability). */
   scores: "probability" | "decision" | "none";
   scaleSensitive: boolean;
   /** Estimator consumes random_state, so the seed changes its fit. */
   seeded: boolean;
+  /** Trained by repeated passes over the data (epochs), so the training configuration includes an epoch count. */
+  iterative?: boolean | undefined;
+  /** Devices the backend can execute on. The caller must request one explicitly; none is chosen silently. */
+  devices?: readonly string[] | undefined;
+  /** Whether the model can train with mixed precision (CUDA only). */
+  mixedPrecision?: boolean | undefined;
 }
 export interface ModelDefinition {
   id: string;
@@ -23,7 +33,7 @@ export interface ModelDefinition {
   displayName: string;
   parameters: Record<string, ParameterSpec>;
   parameterSchema: z.ZodType<Record<string, unknown>>;
-  defaults: Record<string, Scalar>;
+  defaults: Record<string, DefaultValue>;
   capabilities: ModelCapabilities;
   /** Cross-parameter rule; returns a message when the combination is impossible or silently ignored. */
   check?: ((params: Record<string, unknown>) => string | null) | undefined;
@@ -36,13 +46,18 @@ function schemaFor(parameters: Record<string, ParameterSpec>): z.ZodType<Record<
     if (spec.kind === "int") { type = z.int().min(spec.min).max(spec.max); if (spec.nullable) type = type.nullable(); }
     else if (spec.kind === "float") type = spec.openMin ? z.number().gt(spec.min).max(spec.max) : z.number().min(spec.min).max(spec.max);
     else if (spec.kind === "bool") type = z.boolean();
+    else if (spec.kind === "intList") type = z.array(z.int().min(spec.min).max(spec.max)).min(spec.minItems).max(spec.maxItems);
     else type = z.union(spec.values.map(v => z.literal(v)) as unknown as [z.ZodType, z.ZodType]);
     shape[name] = type.optional();
   }
   return z.strictObject(shape);
 }
+/** Backend-neutral definition builder: the catalog is data, and a backend's definitions are registered, not branched on. */
+export function defineModel(model: { backend: string; id: string; taskType: TaskType; displayName: string; parameters: Record<string, ParameterSpec>; capabilities: ModelCapabilities; check?: ModelDefinition["check"] }): ModelDefinition {
+  return { ...model, parameterSchema: schemaFor(model.parameters), defaults: Object.fromEntries(Object.entries(model.parameters).map(([k, v]) => [k, v.default])) };
+}
 function define(id: string, taskType: TaskType, displayName: string, parameters: Record<string, ParameterSpec>, capabilities: ModelCapabilities, check?: ModelDefinition["check"]): ModelDefinition {
-  return { id, backend: "sklearn", taskType, displayName, parameters, parameterSchema: schemaFor(parameters), defaults: Object.fromEntries(Object.entries(parameters).map(([k, v]) => [k, v.default])), capabilities, check };
+  return defineModel({ backend: "sklearn", id, taskType, displayName, parameters, capabilities, check });
 }
 
 const depth = (max = 100): ParameterSpec => ({ kind: "int", min: 1, max, nullable: true, default: null });

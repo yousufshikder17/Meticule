@@ -4,6 +4,7 @@ import { ConflictError, NotFoundError } from "../domain/errors.js";
 import { canonicalJsonHash } from "../domain/canonical-json.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, MlBackend } from "./backend.js";
+import { failureCategory, MlBackendFailure } from "./contract.js";
 import { TrainingSnapshot, assertModelTransition, cohortKey, compareMetrics, validateRows, type ModelState, type MetricValue } from "./domain.js";
 import { audit, authorizeMl, transaction } from "./persistence.js";
 
@@ -78,14 +79,14 @@ export class MlModelService {
       const p = await c.query("INSERT INTO ml_predictions(tenant_id,endpoint_id,model_version_id,input_hash,count) VALUES($1,$2,$3,$4,$5) RETURNING *", [principal.tenantId, endpointId, model.model_version_id, canonicalJsonHash(rows), rows.length]);
       return { record: p.rows[0], model, snapshot, rows, backend };
     });
-    const started = Date.now(); let output: unknown[] | null = null; let failure: { code: string; message: string } | null = null;
+    const started = Date.now(); let output: unknown[] | null = null; let failure: { code: string; category: string; message: string } | null = null;
     try {
-      if (pending.backend.artifactFormats && !pending.backend.artifactFormats.includes(pending.model.format)) throw new Error("Unsupported artifact format");
+      if (!pending.backend.capabilities.artifactFormats.includes(pending.model.format)) throw new MlBackendFailure("incompatible_artifact", "Unsupported artifact format");
       const bytes = await this.artifacts.get(principal.tenantId, pending.model.content);
       output = await pending.backend.predict(pending.snapshot, bytes, pending.rows, pending.model.environment, signal);
-      if (output.length !== pending.rows.length) throw new Error("Prediction count mismatch");
+      if (output.length !== pending.rows.length) throw new MlBackendFailure("invalid_response", "Prediction count mismatch");
       z.array(z.json()).parse(output);
-    } catch { output = null; failure = { code: "ml_prediction_failed", message: "Inference failed; inspect worker environment and artifact integrity" }; }
+    } catch (error) { output = null; failure = { code: "ml_prediction_failed", category: error instanceof z.ZodError ? "invalid_response" : failureCategory(error, "prediction_failed"), message: "Inference failed; inspect worker environment and artifact integrity" }; }
     return transaction(this.pool, async c => {
       const p = await c.query("UPDATE ml_predictions SET status=$1,latency_ms=$2,output=$3,failure=$4 WHERE tenant_id=$5 AND id=$6 AND status='PENDING' RETURNING *", [failure ? "FAILED" : "COMPLETED", Date.now() - started, output ? JSON.stringify(output) : null, failure ? JSON.stringify(failure) : null, principal.tenantId, pending.record.id]);
       await audit(c, principal.tenantId, principal.userId, "ml.prediction_recorded", { predictionId: pending.record.id, status: p.rows[0].status, endpointId }); return p.rows[0];

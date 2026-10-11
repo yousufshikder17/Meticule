@@ -27,7 +27,23 @@ export const SplitDefinition = z.object({ id: Id, strategy: z.literal("random"),
 // Cross-validation runs over the training partition only; validation and test stay untouched for later scoring.
 export const CvSpec = z.object({ strategy: z.enum(["kfold", "stratified_kfold"]), folds: z.int().min(2).max(20) });
 export const EvaluationSpec = z.object({ metrics: z.array(Name).min(1).max(10).refine(x => new Set(x).size === x.length, "Duplicate metrics").optional(), cv: CvSpec.optional() });
-export const TrainingSpec = z.object({ datasetVersionId: Id, featurePipelineId: Id, backend: Name, algorithm: Name, hyperparameters: JsonObject.default({}), seed: z.int().min(0).max(4_294_967_295), split: SplitDefinition, evaluation: EvaluationSpec.default({}), source: z.object({ revision: z.string().min(1).max(200), repository: z.string().max(500).optional(), dirty: z.boolean() }).nullable().default(null) });
+// Framework-neutral training policy (Phase 3B). Meticule owns it; backends only run the bounded chunks it asks for.
+// Epoch history and checkpoints are bounded by the catalog epoch limit, so policy stays small and explicit.
+export const EarlyStoppingPolicy = z.strictObject({ patience: z.int().min(1).max(50), minDelta: z.number().min(0).max(1e6).default(0) });
+// The device and precision vocabulary is declared once here; backend capabilities and the catalog use the same values.
+export const DEVICES = ["cpu", "cuda"] as const;
+export const PRECISIONS = ["fp32", "mixed"] as const;
+export const TrainingPolicy = z.strictObject({
+  // Epochs per checkpoint. Each chunk is one bounded backend call; 1 gives per-epoch durability.
+  checkpointEveryEpochs: z.int().min(1).max(50).default(5),
+  // Monitors validation loss (lower is better). Restores the best-epoch model when enabled.
+  earlyStopping: EarlyStoppingPolicy.nullable().default(null),
+  // Explicit device. CUDA is never chosen silently: if it is requested and unavailable, the job fails.
+  device: z.enum(DEVICES).default("cpu"),
+  // Mixed precision is explicit and CUDA-only. CPU training stays fp32.
+  precision: z.enum(PRECISIONS).default("fp32"),
+}).refine(p => p.precision === "fp32" || p.device === "cuda", "Mixed precision requires device cuda").nullable().default(null);
+export const TrainingSpec = z.object({ datasetVersionId: Id, featurePipelineId: Id, backend: Name, algorithm: Name, hyperparameters: JsonObject.default({}), seed: z.int().min(0).max(4_294_967_295), training: TrainingPolicy, split: SplitDefinition, evaluation: EvaluationSpec.default({}), source: z.object({ revision: z.string().min(1).max(200), repository: z.string().max(500).optional(), dirty: z.boolean() }).nullable().default(null) });
 export const TrainingSnapshot = TrainingSpec.extend({ dataset: DatasetVersion, pipeline: FeaturePipeline });
 export const TRAINING_STATES = ["QUEUED", "PREPARING", "TRAINING", "EVALUATING", "SAVING", "COMPLETED", "FAILED", "CANCELLED"] as const;
 export type TrainingState = typeof TRAINING_STATES[number];

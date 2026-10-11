@@ -14,6 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import emit, full_run, ml_backend, run, snapshot  # noqa: E402
+import ml_runtime_common as common  # noqa: E402
 
 LEGACY = Path(__file__).resolve().parent / "legacy" / "sklearn_runner_phase1.py"
 ADAPTER = Path(ml_backend.__file__)
@@ -50,7 +51,7 @@ def without(env, *keys):
 prepared, model, evaluation = full_run(spec, rows)
 env = model["environment"]
 baseline = predicts(model["artifact"], env)
-results["new_artifact_records_provenance"] = env["adapter_sha256"] == hashlib.sha256(ADAPTER.read_bytes()).hexdigest() and env["artifact_schema"] == "1" and env["protocol"] == ml_backend.PROTOCOL and env["backend"] == "sklearn" and env["artifact_format"] == "sklearn-pickle-v1"
+results["new_artifact_records_provenance"] = env["adapter_sha256"] == common.runner_closure_sha256(ADAPTER, common.__file__) and env["artifact_schema"] == "1" and env["protocol"] == ml_backend.PROTOCOL and env["backend"] == "sklearn" and env["artifact_format"] == "sklearn-pickle-v1"
 results["new_artifact_embeds_same_environment"] = pickle.loads(base64.b64decode(model["artifact"]))["environment"] == env
 
 # Provenance-only differences (checksum, platform, python patch) are tolerated, at request level and inside the artifact.

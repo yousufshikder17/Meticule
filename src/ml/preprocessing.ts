@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
 import type { Snapshot } from "./domain.js";
 
-// Operations are interpreted by the sklearn adapter. "numeric" ops run in order over number features,
+// Operations are interpreted by the backends that declare them. "numeric" ops run in order over number features,
 // "categorical" ops over string/boolean features, "global" ops over the assembled matrix. All are fitted on training rows only.
 const none = z.strictObject({});
 export const OPERATIONS = {
@@ -25,7 +25,7 @@ export function validatePipeline(snapshot: Snapshot): void {
   const seen = new Set<string>();
   for (const step of steps) {
     const op = (OPERATIONS as Record<string, (typeof OPERATIONS)[keyof typeof OPERATIONS]>)[step.operation];
-    if (!op) throw new ConflictError(`Unsupported sklearn pipeline operation: ${step.operation}`);
+    if (!op) throw new ConflictError(`Unsupported pipeline operation: ${step.operation}`);
     if (seen.has(step.operation)) throw new ConflictError(`Duplicate pipeline operation: ${step.operation}`);
     seen.add(step.operation);
     const parsed = op.parameters.safeParse(step.parameters);

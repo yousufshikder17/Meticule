@@ -27,8 +27,12 @@ async function tamper(key: string) {
   try { await c.query("ALTER TABLE ml_blobs DISABLE TRIGGER ml_blob_append_only"); await c.query("UPDATE ml_blobs SET content=$1 WHERE tenant_id=$2 AND content_hash=$3", [Buffer.from("tampered"), manager.tenantId, key]); }
   finally { await c.query("ALTER TABLE ml_blobs ENABLE TRIGGER ml_blob_append_only").catch(() => undefined); c.release(); }
 }
-const legacyScript = resolve("tests/python/legacy/sklearn_runner_phase1.py");
-const sha = async (path: string) => createHash("sha256").update(await readFile(path)).digest("hex");
+// The frozen Phase 1 adapter, unchanged, run behind the v1 envelope. Its checksum is taken from the adapter file itself.
+const legacyAdapter = resolve("tests/python/legacy/sklearn_runner_phase1.py");
+const legacyScript = resolve("tests/python/legacy/phase1_envelope.py");
+// Provenance covers the runner and the shared modules it imports, hashed in the order the runner uses.
+const closureSha = async (...paths: string[]) => { const h = createHash("sha256"); for (const p of paths) h.update(await readFile(p)); return h.digest("hex"); };
+const sharedRuntime = resolve("ml/ml_runtime_common.py");
 
 /** Trains with `trainer`, registers and serves with `server`; returns what is needed to predict and inspect. */
 async function serve(trainer: SklearnBackend, server: SklearnBackend) {
@@ -47,10 +51,10 @@ async function serve(trainer: SklearnBackend, server: SklearnBackend) {
 describe.runIf(Boolean(python))("artifact compatibility through registry and inference", () => {
   it("keeps serving after an implementation-only adapter change and preserves the original checksum", async () => {
     const original = new SklearnBackend(python!); const edited = join(scripts, "sklearn_runner_edited.py");
-    await copyFile(resolve("ml/sklearn_runner.py"), edited); await appendFile(edited, "\n# harmless implementation edit: changes the checksum, not the artifact contract\n");
+    await copyFile(resolve("ml/sklearn_runner.py"), edited); await copyFile(sharedRuntime, join(scripts, "ml_runtime_common.py")); await appendFile(edited, "\n# harmless implementation edit: changes the checksum, not the artifact contract\n");
     const drifted = new SklearnBackend(python!, 120_000, edited);
     const s = await serve(original, drifted);
-    expect(s.attempt.environment.adapter_sha256).toBe(await sha(resolve("ml/sklearn_runner.py"))); expect(await sha(edited)).not.toBe(s.attempt.environment.adapter_sha256);
+    expect(s.attempt.environment.adapter_sha256).toBe(await closureSha(resolve("ml/sklearn_runner.py"), sharedRuntime)); expect(await closureSha(edited, join(scripts, "ml_runtime_common.py"))).not.toBe(s.attempt.environment.adapter_sha256);
     expect(s.attempt.environment).toMatchObject({ backend: "sklearn", artifact_format: "sklearn-pickle-v1", artifact_schema: "1", protocol: "meticule-sklearn-v2" });
     const prediction = await s.predict(); expect(prediction.status).toBe("COMPLETED"); expect(prediction.output[0]).toBeCloseTo(21, 0);
     expect((await pool.query("SELECT environment FROM ml_training_runs WHERE id=$1", [s.attempt.id])).rows[0].environment.adapter_sha256).toBe(s.attempt.environment.adapter_sha256);
@@ -58,14 +62,14 @@ describe.runIf(Boolean(python))("artifact compatibility through registry and inf
   it("serves a model trained and registered under the unmodified Phase 1 adapter, retaining its evidence", async () => {
     const s = await serve(new SklearnBackend(python!, 120_000, legacyScript), new SklearnBackend(python!));
     expect(s.attempt.environment.protocol).toBe("meticule-sklearn-v1"); expect(s.attempt.environment).not.toHaveProperty("artifact_schema");
-    expect(s.attempt.environment.adapter_sha256).toBe(await sha(legacyScript));
+    expect(s.attempt.environment.adapter_sha256).toBe(await closureSha(legacyAdapter));
     const prediction = await s.predict(); expect(prediction.status).toBe("COMPLETED"); expect(prediction.output[0]).toBeCloseTo(21, 0);
   }, timeout);
   it("still refuses artifacts when integrity, format or runtime guarantees fail", async () => {
     const backend = new SklearnBackend(python!); const s = await serve(backend, backend);
     expect((await s.predict()).status).toBe("COMPLETED");
     // Unsupported stored format: refused before the bytes are read.
-    const strict = Object.assign(Object.create(backend) as SklearnBackend, { artifactFormats: ["something-else"] });
+    const strict = Object.assign(Object.create(backend) as SklearnBackend, { capabilities: { ...backend.capabilities, artifactFormats: ["something-else"] } });
     const strictModels = new MlModelService(pool, store, new Map([["sklearn", strict]]));
     const wrongFormat = await strictModels.predict(manager, s.endpoint.id, [{ x: 10 }], new AbortController().signal);
     expect(wrongFormat.status).toBe("FAILED"); expect(JSON.stringify(wrongFormat)).not.toMatch(/pickle|something-else|Traceback/);

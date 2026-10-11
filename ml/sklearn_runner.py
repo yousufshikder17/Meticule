@@ -1,10 +1,7 @@
 """Bounded scikit-learn computation protocol. No database, scheduler or client paths."""
 import base64
 import json
-import hashlib
-from pathlib import Path
 import pickle
-import platform
 import sys
 import time
 
@@ -13,15 +10,14 @@ import scipy
 import sklearn
 import joblib
 import threadpoolctl
+
+import ml_runtime_common as common
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (GradientBoostingClassifier, GradientBoostingRegressor,
                               RandomForestClassifier, RandomForestRegressor)
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
-from sklearn.metrics import (accuracy_score, f1_score, log_loss, mean_absolute_error, mean_squared_error,
-                             precision_score, r2_score, recall_score, roc_auc_score)
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, OrdinalEncoder, StandardScaler
@@ -47,10 +43,6 @@ MODELS = {
     "decision_tree_regressor": (DecisionTreeRegressor, "regression"),
 }
 SINGLE_THREAD = (RandomForestClassifier, RandomForestRegressor, KNeighborsClassifier, KNeighborsRegressor)
-DIRECTIONS = {"accuracy": "higher", "precision": "higher", "recall": "higher", "f1": "higher", "roc_auc": "higher",
-              "log_loss": "lower", "mae": "lower", "mse": "lower", "rmse": "lower", "r2": "higher"}
-TASK_METRICS = {"classification": ("accuracy", "precision", "recall", "f1", "roc_auc", "log_loss"),
-                "regression": ("mae", "mse", "rmse", "r2")}
 DEFAULT_METRICS = {"classification": ["accuracy"], "regression": ["mae", "mse"]}
 
 
@@ -71,40 +63,21 @@ SUPPORTED_SCHEMAS = {1}
 RUNTIME_KEYS = ("sklearn", "numpy", "scipy", "joblib", "threadpoolctl")
 
 
-class IncompatibleArtifact(ValueError):
-    pass
+IncompatibleArtifact = common.IncompatibleArtifact
+DIRECTIONS, TASK_METRICS = common.DIRECTIONS, common.TASK_METRICS
+CONTRACT = {"backend": BACKEND, "artifact_format": ARTIFACT_FORMAT, "protocols": SUPPORTED_PROTOCOLS,
+            "schemas": SUPPORTED_SCHEMAS, "runtime_keys": RUNTIME_KEYS}
 
 
 def environment():
-    return {"backend": BACKEND, "artifact_format": ARTIFACT_FORMAT, "artifact_schema": str(ARTIFACT_SCHEMA), "protocol": PROTOCOL,
-            "python": platform.python_version(), "sklearn": sklearn.__version__,
-            "numpy": np.__version__, "scipy": scipy.__version__, "platform": platform.platform(),
-            "joblib": joblib.__version__, "threadpoolctl": threadpoolctl.__version__,
-            "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    return common.base_environment([__file__, common.__file__], BACKEND, ARTIFACT_FORMAT, ARTIFACT_SCHEMA, PROTOCOL,
+                                   {"sklearn": sklearn.__version__, "numpy": np.__version__, "scipy": scipy.__version__,
+                                    "joblib": joblib.__version__, "threadpoolctl": threadpoolctl.__version__})
 
 
 def check_compatible(recorded, current):
     """Raise IncompatibleArtifact unless an artifact recorded under `recorded` can be used by this runtime."""
-    if not isinstance(recorded, dict):
-        raise IncompatibleArtifact("missing environment")
-    if recorded.get("backend", BACKEND) != BACKEND:
-        raise IncompatibleArtifact("different backend")
-    if recorded.get("artifact_format", ARTIFACT_FORMAT) != ARTIFACT_FORMAT:
-        raise IncompatibleArtifact("unsupported artifact format")
-    protocol = recorded.get("protocol")
-    if protocol not in SUPPORTED_PROTOCOLS:
-        raise IncompatibleArtifact("unsupported protocol")
-    try:
-        schema = int(recorded.get("artifact_schema", SUPPORTED_PROTOCOLS[protocol]))
-    except (TypeError, ValueError):
-        raise IncompatibleArtifact("unreadable artifact schema") from None
-    if schema not in SUPPORTED_SCHEMAS:
-        raise IncompatibleArtifact("unsupported artifact schema")
-    if ".".join(str(recorded.get("python", "")).split(".")[:2]) != ".".join(current["python"].split(".")[:2]):
-        raise IncompatibleArtifact("python major.minor differs")
-    for key in RUNTIME_KEYS:
-        if recorded.get(key) != current[key]:
-            raise IncompatibleArtifact(f"{key} version differs")
+    common.check_compatible(recorded, current, CONTRACT)
 
 
 def feature_types(spec):
@@ -175,54 +148,30 @@ def is_classification(spec):
 
 
 def requested_metrics(spec):
-    task = MODELS[spec["algorithm"]][1]
-    names = (spec.get("evaluation") or {}).get("metrics") or DEFAULT_METRICS[task]
-    for name in names:
-        if name not in TASK_METRICS[task]:
-            raise ValueError("Metric does not apply to task")
-    return names
-
-
-def scores(pipeline, x):
-    estimator = pipeline[-1]
-    if hasattr(estimator, "predict_proba"):
-        return pipeline.predict_proba(x)
-    if hasattr(estimator, "decision_function"):
-        return pipeline.decision_function(x)
-    raise ValueError("Estimator exposes no scores")
+    return common.requested_metrics(spec, MODELS[spec["algorithm"]][1])
 
 
 def measure(names, spec, pipeline, x, y):
-    """Compute only the requested metrics; an unavailable one is an error, never a silent omission."""
+    """Estimator-side extraction of predictions and scores, then the shared metric computation."""
+    estimator = pipeline[-1]
     prediction = pipeline.predict(x)
-    values = {}
-    for name in names:
-        if name == "accuracy":
-            values[name] = accuracy_score(y, prediction)
-        elif name in ("precision", "recall", "f1"):
-            fn = {"precision": precision_score, "recall": recall_score, "f1": f1_score}[name]
-            values[name] = fn(y, prediction, average="weighted", zero_division=0)
-        elif name == "roc_auc":
-            s, classes = scores(pipeline, x), pipeline[-1].classes_
-            if len(classes) == 2:
-                values[name] = roc_auc_score(y, s[:, 1] if s.ndim == 2 else s)
-            elif s.ndim == 2 and hasattr(pipeline[-1], "predict_proba"):
-                values[name] = roc_auc_score(y, s, multi_class="ovr", labels=classes)
-            else:
-                raise ValueError("Multiclass roc_auc needs probabilities")
-        elif name == "log_loss":
-            if not hasattr(pipeline[-1], "predict_proba"):
-                raise ValueError("log_loss needs probabilities")
-            values[name] = log_loss(y, pipeline.predict_proba(x), labels=pipeline[-1].classes_)
-        elif name == "mae":
-            values[name] = mean_absolute_error(y, prediction)
-        elif name == "mse":
-            values[name] = mean_squared_error(y, prediction)
-        elif name == "rmse":
-            values[name] = float(np.sqrt(mean_squared_error(y, prediction)))
-        elif name == "r2":
-            values[name] = r2_score(y, prediction)
-    return {k: float(v) for k, v in values.items()}
+    proba = pipeline.predict_proba(x) if hasattr(estimator, "predict_proba") else None
+    scores_ = proba if proba is not None else (pipeline.decision_function(x) if hasattr(estimator, "decision_function") else None)
+    classes = estimator.classes_ if hasattr(estimator, "classes_") else None
+    return common.measure_predictions(names, y, prediction, proba=proba, scores=scores_, classes=classes)
+
+
+def load_artifact(encoded, current_env):
+    """Unpickles a worker-produced artifact only after its recorded environment is accepted. Unreadable bytes are refused
+    as an incompatible artifact, never reported as a framework exception."""
+    try:
+        model = pickle.loads(base64.b64decode(encoded, validate=True))
+    except Exception:
+        raise IncompatibleArtifact("unreadable artifact") from None
+    if not isinstance(model, dict) or "pipeline" not in model or "environment" not in model:
+        raise IncompatibleArtifact("malformed artifact")
+    check_compatible(model["environment"], current_env)
+    return model
 
 
 def execute(request):
@@ -239,23 +188,12 @@ def execute(request):
     command = request["command"]
     if command == "predict":
         # Only checksum-verified worker-produced artifacts reach this process. Never accept uploads.
-        model = pickle.loads(base64.b64decode(request["artifact"], validate=True))
-        check_compatible(model["environment"], env)
+        model = load_artifact(request["artifact"], env)
         return {"predictions": model["pipeline"].predict(x).tolist()}
     y = np.array([row[spec["dataset"]["schema"]["target"]] for row in rows])
     cv = (spec.get("evaluation") or {}).get("cv")
     if command == "prepare":
-        split = spec["split"]
-        indices = np.arange(len(rows))
-        train, holdout = train_test_split(indices, train_size=split["train"], random_state=spec["seed"],
-                                          stratify=y if split["stratify"] else None)
-        validation, test = train_test_split(holdout, train_size=split["validation"] / (split["validation"] + split["test"]),
-                                            random_state=spec["seed"], stratify=y[holdout] if split["stratify"] else None)
-        result = {"indices": {"train": train.tolist(), "validation": validation.tolist(), "test": test.tolist()}, "environment": env}
-        if cv:
-            stratified = cv["strategy"] == "stratified_kfold"
-            splitter = (StratifiedKFold if stratified else KFold)(n_splits=cv["folds"], shuffle=True, random_state=spec["seed"])
-            result["folds"] = [train[val].tolist() for _, val in splitter.split(np.zeros(len(train)), y[train] if stratified else None)]
+        result = {**common.partitions(spec, y), "environment": env}
         return result
     if command == "train":
         pipeline = build_pipeline(spec)
@@ -268,8 +206,7 @@ def execute(request):
         return {"artifact": base64.b64encode(payload).decode(), "format": "sklearn-pickle-v1", "environment": env,
                 "resolvedHyperparameters": pipeline[-1].get_params(deep=False), "performance": {"fitSeconds": fit_seconds}}
     if command == "evaluate":
-        model = pickle.loads(base64.b64decode(request["artifact"], validate=True))
-        check_compatible(model["environment"], env)
+        model = load_artifact(request["artifact"], env)
         names = requested_metrics(spec)
         metrics, performance = [], {}
 
@@ -306,9 +243,4 @@ def execute(request):
 
 
 if __name__ == "__main__":
-    try:
-        print(json.dumps(execute(json.load(sys.stdin)), allow_nan=False))
-    except Exception as error:
-        # Do not echo dataset values, labels, paths or request bodies through API errors.
-        print(json.dumps({"error": type(error).__name__}), file=sys.stderr)
-        sys.exit(1)
+    sys.exit(common.serve(execute))

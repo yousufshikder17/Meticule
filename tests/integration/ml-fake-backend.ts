@@ -5,6 +5,8 @@ import type { MetricValue, Row, Snapshot } from "../../src/ml/domain.js";
 /** Deterministic stand-in: scores come from a table so ranking, failure and cancellation can be asserted exactly. */
 export class FakeBackend implements MlBackend {
   readonly id = "sklearn";
+  // Declares exactly what it writes: the processor refuses an artifact format a backend did not declare.
+  readonly capabilities = { artifactFormats: ["fake-v1"], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: [], iterative: false } as const;
   scores: Record<string, number> = { logistic_regression: .8, random_forest_classifier: .9, gradient_boosting_classifier: .85, svc: .7, k_neighbors_classifier: .6, decision_tree_classifier: .5 };
   fail = new Set<string>(); failWhen: ((s: Snapshot) => boolean) | null = null; delayMs = 0; hang: string | null = null; started: (() => void) | null = null; skewSplit = new Set<string>();
   validate(): void {}

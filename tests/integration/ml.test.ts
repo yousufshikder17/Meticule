@@ -23,6 +23,7 @@ const outsider: Principal = { ...manager, tenantId: "33333333-3333-4333-8333-333
 let store: PostgresArtifactStore;
 class TestBackend implements MlBackend {
   readonly id = "test-ml";
+  readonly capabilities = { artifactFormats: ["test-v1"], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: [], iterative: false } as const;
   validate(): void {}
   async prepare(_s: Snapshot, rows: Row[]): Promise<PreparedData> { return { indices: { train: rows.map((_, i) => i).slice(0, 36), validation: rows.map((_, i) => i).slice(36, 48), test: rows.map((_, i) => i).slice(48) }, environment: { protocol: "test" } }; }
   async train(): Promise<TrainedModel> { return { bytes: Buffer.from("test-model"), format: "test-v1", environment: { protocol: "test" }, resolvedHyperparameters: { alpha: 1 } }; }
