@@ -137,6 +137,16 @@ describe("durable ML subsystem", () => {
     expect(result.attempts[0].failure).toMatchObject({ code: "ml_training_failed", category: "training_failed" });
     expect(result.attempts[0].failure.message).not.toMatch(/ENOENT|\/srv\/|tenant-artifacts/);
   });
+  it("fails clearly, storing nothing, when a trained artifact exceeds the public storage limit", async () => {
+    const backend = new TestBackend();
+    backend.train = async () => ({ bytes: Buffer.alloc(16_000_001, 1), format: "test-v1", environment: { protocol: "test" }, resolvedHyperparameters: {} });
+    const f = await fixture(backend); await f.worker.tick(); const result = await f.training.getJob(manager, f.job.id);
+    expect(result.job.status).toBe("FAILED");
+    expect(result.attempts[0].failure).toMatchObject({ code: "ml_training_failed", category: "output_limit_exceeded" });
+    expect(result.attempts[0].failure.message).toMatch(/16 MB public storage limit/);
+    expect(result.artifacts).toHaveLength(0);
+    expect((await pool.query("SELECT count(*)::int AS n FROM ml_blobs WHERE octet_length(content) > 16000000")).rows[0].n).toBe(0);
+  });
   it("rolls back finalization on invalid metric evidence", async () => {
     const backend = new TestBackend(); const evaluate = backend.evaluate.bind(backend);
     backend.evaluate = async () => { const metrics = await evaluate(); return [...metrics, metrics[0]!]; };

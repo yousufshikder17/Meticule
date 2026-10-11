@@ -3,14 +3,20 @@ import type pg from "pg";
 import { z } from "zod";
 import { NotFoundError } from "../domain/errors.js";
 import type { ArtifactStore } from "./backend.js";
+import { MlBackendFailure } from "./contract.js";
 import { ArtifactReferenceSchema, type ArtifactReference } from "./domain.js";
+
+/** Public storage bound for one blob: datasets, model artifacts and training checkpoints alike. */
+export const MAX_ARTIFACT_BYTES = 16_000_000;
 
 // ponytail: PostgreSQL blobs capped at 16 MB; use an object-store adapter for larger artifacts.
 export class PostgresArtifactStore implements ArtifactStore {
   constructor(private readonly database: pg.Pool) {}
   async put(tenantId: string, bytes: Uint8Array, mediaType: string): Promise<ArtifactReference> {
     z.uuid().parse(tenantId);
-    if (!bytes.byteLength || bytes.byteLength > 16_000_000) throw new Error("ML artifact must be between 1 byte and 16 MB");
+    // Classified, so the limit reaches a stored training failure as a clear reason rather than a generic message.
+    if (!bytes.byteLength) throw new MlBackendFailure("invalid_response", "ML artifact must not be empty");
+    if (bytes.byteLength > MAX_ARTIFACT_BYTES) throw new MlBackendFailure("output_limit_exceeded", `ML artifact of ${bytes.byteLength} bytes exceeds the 16 MB public storage limit`);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const reference = ArtifactReferenceSchema.parse({ key: sha256, sha256, size: bytes.byteLength, mediaType });
     await this.database.query("INSERT INTO ml_blobs(tenant_id,content_hash,media_type,content) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", [tenantId, sha256, mediaType, Buffer.from(bytes)]);
