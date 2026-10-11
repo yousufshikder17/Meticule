@@ -1,0 +1,7 @@
+# TensorFlow CPU backend (Phase 3D). Kept separate from PyTorch: install only where TensorFlow models run.
+# CPU only on every platform. Native Windows TensorFlow (2.11+) has no CUDA build; Linux uses the CPU-only tensorflow-cpu
+# wheel, so CI never downloads CUDA libraries. The pins match the verified environments.
+-r requirements.txt
+tensorflow==2.20.0; sys_platform == "win32"
+tensorflow-cpu==2.20.0; sys_platform != "win32"
+keras==3.15.1
