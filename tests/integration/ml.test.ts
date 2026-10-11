@@ -113,10 +113,10 @@ describe("durable ML subsystem", () => {
     await pool.query("UPDATE runs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [f.job.run_id]); await runs.recoverExpired();
     await runs.claimNext("same-worker", 30, "ml"); await runs.workerTransition(f.job.run_id, "same-worker", "running");
     const current = await f.training.begin(f.job.run_id, "same-worker");
-    await f.training.fail(f.job.run_id, "same-worker", abandoned.id, "stale failure");
+    await f.training.fail(f.job.run_id, "same-worker", abandoned.id, { category: "training_failed", message: "stale failure" });
     await expect(f.training.phase(f.job.run_id, "same-worker", abandoned.id, "TRAINING")).rejects.toThrow();
     const result = await f.training.getJob(manager, f.job.id); expect(result.job.runtime_status).toBe("running"); expect(result.attempts[1].id).toBe(current.id); expect(result.attempts[1].status).toBe("PREPARING");
-    await f.training.fail(f.job.run_id, "same-worker", current.id, "current failure");
+    await f.training.fail(f.job.run_id, "same-worker", current.id, { category: "training_failed", message: "current failure" });
     expect((await f.training.getJob(manager, f.job.id)).job.status).toBe("FAILED");
   });
   it("deduplicates durable artifacts, isolates tenants and verifies load integrity", async () => {
@@ -128,6 +128,14 @@ describe("durable ML subsystem", () => {
     await expect(store.get(manager.tenantId, { ...reference, size: 999 })).rejects.toThrow(/checksum/);
     await expect(pool.query("UPDATE ml_blobs SET content=$1 WHERE tenant_id=$2", [Buffer.from("tampered"), manager.tenantId])).rejects.toThrow(/immutable|append/);
     await withTenantSession(pool, outsider.tenantId, async db => { expect((await db.query("SELECT * FROM ml_blobs")).rowCount).toBe(0); });
+  });
+  it("never persists unclassified error text, which can name server paths, in a training failure", async () => {
+    const backend = new TestBackend();
+    backend.prepare = async () => { throw new Error("ENOENT: no such file or directory, open '/srv/meticule/private/tenant-artifacts/0f00'"); };
+    const f = await fixture(backend); await f.worker.tick(); const result = await f.training.getJob(manager, f.job.id);
+    expect(result.job.status).toBe("FAILED");
+    expect(result.attempts[0].failure).toMatchObject({ code: "ml_training_failed", category: "training_failed" });
+    expect(result.attempts[0].failure.message).not.toMatch(/ENOENT|\/srv\/|tenant-artifacts/);
   });
   it("rolls back finalization on invalid metric evidence", async () => {
     const backend = new TestBackend(); const evaluate = backend.evaluate.bind(backend);

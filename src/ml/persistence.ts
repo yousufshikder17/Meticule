@@ -7,6 +7,7 @@ import { RunRepository } from "../db/repositories.js";
 import { scopedPool } from "../db/tenant-session.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, Performance, PreparedData, TrainedModel } from "./backend.js";
+import type { EpochSummary } from "./training-policy.js";
 import { DatasetSchema, DatasetVersion, FeaturePipeline, Metric, PipelineDefinition, TrainingSnapshot, TrainingSpec, assertMetricShape, assertTrainingTransition, validateRows, validateSnapshot, type ArtifactReference, type MetricValue, type Snapshot, type TrainingState } from "./domain.js";
 
 export function authorizeMl(p: Principal, write = false): void {
@@ -114,11 +115,16 @@ export class MlTrainingService {
       if (!job || job.status !== "QUEUED") throw new ConflictError("Training job is not queued");
       const snapshot = TrainingSnapshot.parse(job.snapshot); validateSnapshot(snapshot);
       const next = await c.query("SELECT COALESCE(max(attempt),0)+1 AS attempt FROM ml_training_runs WHERE tenant_id=$1 AND job_id=$2", [run.tenant_id, job.id]);
-      const t = await c.query("INSERT INTO ml_training_runs(tenant_id,job_id,attempt,snapshot) VALUES($1,$2,$3,$4) RETURNING *", [run.tenant_id, job.id, next.rows[0].attempt, JSON.stringify(snapshot)]);
+      // Resume rule: the job's newest checkpoint, from any earlier attempt, is the only starting point. No checkpoint
+      // means a fresh start. A checkpoint that cannot be loaded or validated fails the attempt; it never restarts silently.
+      const latest = (await c.query("SELECT c.epoch,c.content,c.format,c.schema_version FROM ml_training_checkpoints c JOIN ml_training_runs t ON t.tenant_id=c.tenant_id AND t.id=c.training_run_id WHERE t.tenant_id=$1 AND t.job_id=$2 ORDER BY c.epoch DESC LIMIT 1", [run.tenant_id, job.id])).rows[0];
+      const previous = (await c.query("SELECT split_indices FROM ml_training_runs WHERE tenant_id=$1 AND job_id=$2 AND split_indices <> '{}'::jsonb ORDER BY attempt DESC LIMIT 1", [run.tenant_id, job.id])).rows[0];
+      const t = await c.query("INSERT INTO ml_training_runs(tenant_id,job_id,attempt,snapshot,resumed_from_epoch) VALUES($1,$2,$3,$4,$5) RETURNING *", [run.tenant_id, job.id, next.rows[0].attempt, JSON.stringify(snapshot), latest?.epoch ?? null]);
       await c.query("UPDATE ml_training_jobs SET status='PREPARING' WHERE id=$1", [job.id]);
       await c.query("UPDATE ml_training_runs SET status='PREPARING' WHERE id=$1", [t.rows[0].id]);
-      await audit(c, run.tenant_id, workerId, "ml.attempt_started", { trainingRunId: t.rows[0].id, attempt: next.rows[0].attempt }, runId, "worker");
-      return { id: t.rows[0].id as string, tenantId: run.tenant_id as string, snapshot };
+      await audit(c, run.tenant_id, workerId, "ml.attempt_started", { trainingRunId: t.rows[0].id, attempt: next.rows[0].attempt, resumedFromEpoch: latest?.epoch ?? null }, runId, "worker");
+      const resume = latest ? { epoch: latest.epoch as number, content: latest.content as ArtifactReference, format: latest.format as string, schemaVersion: latest.schema_version as number } : null;
+      return { id: t.rows[0].id as string, jobId: job.id as string, tenantId: run.tenant_id as string, snapshot, resume, previousSplit: (previous?.split_indices ?? null) as Record<string, number[]> | null };
     });
   }
   async phase(runId: string, workerId: string, attemptId: string, to: TrainingState, prepared?: PreparedData, model?: TrainedModel, performance?: Performance) {
@@ -131,11 +137,39 @@ export class MlTrainingService {
       await audit(c, run.tenant_id, workerId, "ml.phase_changed", { trainingRunId: attemptId, from: t.status, to }, runId, "worker");
     });
   }
-  async finish(runId: string, workerId: string, attemptId: string, snapshot: Snapshot, metrics: MetricValue[], content: ArtifactReference, format: string, durationMs: number) {
+  /**
+   * Durable progress for one chunk: its epoch summaries and the checkpoint that ends it. Both are written in one
+   * transaction under the lease fence, so a crash leaves either the whole chunk or none of it.
+   */
+  async checkpoint(runId: string, workerId: string, attemptId: string, epochs: EpochSummary[], checkpoint: { epoch: number; content: ArtifactReference; format: string; schemaVersion: number }) {
+    return transaction(this.pool, async c => {
+      const run = await ownedRun(c, runId, workerId);
+      const t = (await c.query("SELECT t.id,t.status FROM ml_training_runs t JOIN ml_training_jobs j ON j.id=t.job_id AND j.tenant_id=t.tenant_id WHERE t.id=$1 AND j.run_id=$2 FOR UPDATE OF t", [attemptId, runId])).rows[0];
+      if (!t || t.status !== "TRAINING") throw new ConflictError("Attempt is not current");
+      for (const e of epochs) {
+        await c.query("INSERT INTO ml_training_epochs(tenant_id,training_run_id,epoch,train_loss,validation_loss,elapsed_seconds) VALUES($1,$2,$3,$4,$5,$6)", [run.tenant_id, attemptId, e.epoch, e.trainLoss, e.validationLoss, e.elapsedSeconds]);
+      }
+      await c.query("INSERT INTO ml_training_checkpoints(tenant_id,training_run_id,epoch,content,format,schema_version) VALUES($1,$2,$3,$4,$5,$6)", [run.tenant_id, attemptId, checkpoint.epoch, JSON.stringify(checkpoint.content), checkpoint.format, checkpoint.schemaVersion]);
+      await audit(c, run.tenant_id, workerId, "ml.checkpoint_saved", { trainingRunId: attemptId, epoch: checkpoint.epoch, format: checkpoint.format }, runId, "worker");
+    });
+  }
+  /** Validation losses of epochs already completed by earlier attempts, for replaying early stopping on resume. */
+  async priorEpochs(tenantId: string, jobId: string): Promise<{ epoch: number; validationLoss: number | null }[]> {
+    const rows = await this.pool.query("SELECT e.epoch,e.validation_loss FROM ml_training_epochs e JOIN ml_training_runs t ON t.tenant_id=e.tenant_id AND t.id=e.training_run_id WHERE t.tenant_id=$1 AND t.job_id=$2 ORDER BY e.epoch", [tenantId, jobId]);
+    return rows.rows.map(r => ({ epoch: r.epoch as number, validationLoss: r.validation_loss === null ? null : Number(r.validation_loss) }));
+  }
+  /** Epoch history across all attempts of a job, oldest first. Bounded by the catalog's epoch limit. */
+  async history(principal: Principal, jobId: string) {
+    authorizeMl(principal);
+    const rows = await this.pool.query("SELECT t.attempt,e.epoch,e.train_loss,e.validation_loss,e.elapsed_seconds FROM ml_training_epochs e JOIN ml_training_runs t ON t.tenant_id=e.tenant_id AND t.id=e.training_run_id WHERE t.tenant_id=$1 AND t.job_id=$2 ORDER BY e.epoch, t.attempt LIMIT 1000", [principal.tenantId, jobId]);
+    return rows.rows;
+  }
+  async finish(runId: string, workerId: string, attemptId: string, snapshot: Snapshot, metrics: MetricValue[], content: ArtifactReference, format: string, durationMs: number, outcome?: { stopReason: "completed" | "early_stopping"; bestEpoch: number | null }) {
     return transaction(this.pool, async c => {
       const run = await ownedRun(c, runId, workerId);
       const t = (await c.query("SELECT t.id FROM ml_training_runs t JOIN ml_training_jobs j ON j.id=t.job_id AND j.tenant_id=t.tenant_id WHERE t.id=$1 AND j.run_id=$2 AND t.status='SAVING' FOR UPDATE OF t", [attemptId, runId])).rows[0];
       if (!t) throw new ConflictError("No current saving attempt");
+      if (outcome) await c.query("UPDATE ml_training_runs SET stop_reason=$1,best_epoch=$2 WHERE id=$3", [outcome.stopReason, outcome.bestEpoch, attemptId]);
       for (const raw of metrics) {
         assertMetricShape(raw); const m = Metric.parse({ ...raw, id: randomUUID() });
         await c.query("INSERT INTO ml_metrics(id,tenant_id,training_run_id,name,partition,value,direction,fold,std) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [m.id, run.tenant_id, attemptId, m.name, m.partition, m.value, m.direction, m.fold ?? null, m.std ?? null]);
@@ -146,14 +180,15 @@ export class MlTrainingService {
       await audit(c, run.tenant_id, workerId, "ml.training_completed", { trainingRunId: attemptId, artifactId: a.rows[0].id }, runId, "worker");
     });
   }
-  async fail(runId: string, workerId: string, attemptId: string | undefined, message: string): Promise<void> {
+  /** Records a classified failure. `failure` holds a taxonomy category and a message Meticule wrote, never raw error text. */
+  async fail(runId: string, workerId: string, attemptId: string | undefined, failure: { category: string; message: string }): Promise<void> {
     await transaction(this.pool, async c => {
       const r = (await c.query("SELECT *,lease_expires_at>now() AS valid FROM runs WHERE id=$1 FOR UPDATE", [runId])).rows[0];
       if (!r || r.kind !== "ml" || r.lease_owner !== workerId || !r.valid || !["running", "cancelling"].includes(r.status)) return;
       const active = await c.query("SELECT t.id FROM ml_training_runs t JOIN ml_training_jobs j ON j.tenant_id=t.tenant_id AND j.id=t.job_id WHERE j.run_id=$1 AND t.ended_at IS NULL", [runId]);
       // An old processor must never fail a newly reclaimed attempt with the same worker ID.
       if (attemptId ? active.rows[0]?.id !== attemptId : active.rowCount) return;
-      await new RunRepository(scopedPool(c)).workerTransition(runId, workerId, r.status === "cancelling" ? "cancelled" : "failed", { code: "ml_training_failed", message });
+      await new RunRepository(scopedPool(c)).workerTransition(runId, workerId, r.status === "cancelling" ? "cancelled" : "failed", { code: "ml_training_failed", ...failure });
     });
   }
 }
