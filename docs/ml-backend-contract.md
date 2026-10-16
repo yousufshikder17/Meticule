@@ -365,8 +365,8 @@ change.
 | Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` |
 | Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` |
 | Iterative | no | yes | yes | yes | no | no | no | no | no |
-| Tasks | `classification`, `regression`, `anomaly_detection` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression`, `forecasting` | `classification`, `embedding` | `embedding`, `classification` | `forecasting` |
-| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean`; `timestamp` for `lightgbm_forecaster` | `text`, `image` (exactly one) | `audio` (exactly one) | `timestamp` (the split's time column) |
+| Tasks | `classification`, `regression`, `anomaly_detection` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression`, `forecasting` | `classification`, `embedding`, `transcription` | `embedding`, `classification` | `forecasting` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean`; `timestamp` for `lightgbm_forecaster` | `text`, `image`, `audio` (exactly one) | `audio` (exactly one) | `timestamp` (the split's time column) |
 | Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v2 (its snapshots always use non-tabular columns) | v2 | v2 |
 | Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN | none | none | none |
 | Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) | `ML_AUDIO_PYTHON` (the scikit-learn venv) | `ML_FORECASTING_PYTHON` (the scikit-learn venv) |
@@ -405,7 +405,8 @@ default still refuses them), and both frameworks route NaN natively.
 
 ### 13.2 Hugging Face Transformers (Phase 4 M4)
 
-Backend `transformers` (CPU, fp32, one-shot): pretrained BERT/DistilBERT text models and ViT image models that an operator has
+Backend `transformers` (CPU, fp32, one-shot): pretrained BERT/DistilBERT text models, ViT image models and wav2vec2 audio models
+that an operator has
 provisioned under `ML_TRANSFORMERS_MODEL_ROOT`, an absolute existing directory. The root is platform-wide: every tenant may use
 every provisioned model. Each model is one directory holding the Hugging Face files and a `meticule-model.json` manifest
 (`{schema: 1, name, kind, family, source: {repository, revision}, license?, files: {relpath: sha256}}`), written by
@@ -419,6 +420,8 @@ every provisioned model. Each model is one directory holding the Hugging Face fi
 | `image_classifier` | classification | pretrained (binds its labels) | one `image` | image-classifier / vit |
 | `image_embedder` | embedding | pretrained | one `image` | image-encoder / vit |
 | `image_embedding_classifier` | classification | supervised: softmax head over the frozen encoder | one `image` | image-encoder / vit |
+| `audio_classifier` | classification | pretrained (binds its labels) | one `audio` | audio-classifier / wav2vec2 |
+| `speech_recognizer` | transcription | pretrained | one `audio` | speech-ctc / wav2vec2 |
 
 - **Provisioning check (every command, before any framework code touches the files).**
   - The name matches `^[a-z0-9][a-z0-9._-]{0,63}$` and resolves inside the root.
@@ -441,6 +444,13 @@ every provisioned model. Each model is one directory holding the Hugging Face fi
 - **Artifact `transformers-reference-v1`** is JSON. It holds the model reference (name, kind, family, repository, revision and the
   verified digest), labels, settings and any trained head (`ml/linear_heads.py`), never base weights. Every load re-verifies
   the provisioned model and refuses a changed digest. Environments record the model name, family and digest, never a path.
+- **Audio and speech (M8).** Clips are decoded by the audio backend's front end (`audio_common`, section 13.3: the
+  `media_common` walker, mono mean, `resample_poly`) to the rate the model's feature extractor declares (8 to 48 kHz).
+  Both models forward one clip at a time: zero padding changes a group-normalised wav2vec2's outputs, so batching would
+  make a clip's result depend on the other clips in the request. `speech_recognizer` decodes with greedy CTC (argmax per
+  frame, then the CTC tokenizer's collapse); there is no language model and no beam search. A transcript
+  longer than 10,000 characters fails the call. Its training attempt fits nothing: it checks that the target holds text
+  and records `wer` and `cer` against those reference transcripts.
 - **Tests** use tiny random models generated offline (`tests/python/hf_fixtures.py`), including a malicious variant for each
   provisioning rule. They prove the execution path and the safety rules, not semantic quality. Fine-tuning the encoder itself
   (and PEFT/LoRA) is not part of Phase 4.
@@ -647,7 +657,7 @@ including combinations v2 refuses, such as a ridge regression trained on a boole
 ### 19.3 Vocabulary
 
 **Tasks** (`TASK_TYPES`, `src/ml/tasks.ts`): `classification`, `regression`, `forecasting`, `anomaly_detection` and
-`embedding`. `transcription` is not defined yet. The task registry `TASKS` is the single source of what a task means:
+`embedding` and `transcription` (M8). The task registry `TASKS` is the single source of what a task means:
 
 | Task | Target | Target types | Splits | Cross-validation | Prediction rows carry the target | Output | Rows per prediction request |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -656,6 +666,7 @@ including combinations v2 refuses, such as a ridge regression trained on a boole
 | `forecasting` | required | number | chronological | no | yes (history rows) | `horizon` items `{ step, timestamp, value }` | 5,000 history rows |
 | `anomaly_detection` | optional | boolean | random, chronological | no | no | `{ score, anomaly }` per row | 1,000 |
 | `embedding` | optional | number, string, boolean | random, chronological | no | no | a vector of 1 to 4,096 finite numbers per row | 256 |
+| `transcription` | required (non-nullable) | text | random | no | no | one transcript of at most 10,000 characters per row | 8 |
 
 `maxPredictionRows(task, types)` lowers the cap when the prediction rows carry media: 32 with an image column, 16 with an
 audio column, and 64 for an embedding model with a text column.
@@ -665,7 +676,7 @@ audio column, and 64 for an embedding model with a text column.
 cells hold at most 10,000 characters; timestamps, images and audio follow section 19.5.
 
 **Datasets.** The target is optional. When present it must be a number, string, boolean or text column, and the dataset needs
-another column; without a target one column is enough. No M1 task accepts a text target. A dataset version records
+another column; without a target one column is enough. Only `transcription` accepts a text target. A dataset version records
 `datasetValidator(schema)`: `meticule-tabular-v1` when every column is tabular, as before, and `meticule-dataset-v2` once any
 other column type appears.
 
@@ -784,11 +795,12 @@ prints.
 | `threshold_calibration_error` | anomaly_detection | lower | no | diagnostic: \|flagged fraction - contamination\| |
 | `retrieval_precision_at_1`, `retrieval_mrr` | embedding | higher | yes | leave-one-out cosine neighbours within the partition; relevant = same label; ties rank against the model |
 | `mean_pairwise_cosine` | embedding | lower | no | diagnostic: anisotropy |
+| `wer`, `cer` | transcription | lower | yes | corpus rates: summed word (character) edits over summed reference words (characters), on lower-cased whitespace-collapsed text; can exceed 1 |
 
 **Defaults** (`defaultMetrics(task, labelled)`, for a snapshot without `evaluation.metrics`): classification `accuracy`;
 regression `mae` and `mse` (the Phase 1 defaults, still exported as `DEFAULT_METRICS`); forecasting `mae` and `rmse`; anomaly
 detection `average_precision`, or `threshold_calibration_error` without labels; embedding `retrieval_precision_at_1`, or
-`mean_pairwise_cosine` without labels. A task that always has a target has no unlabelled default.
+`mean_pairwise_cosine` without labels; transcription `wer` and `cer`. A task that always has a target has no unlabelled default.
 
 **Refusals.** `assertMetricsSupported(model, metrics, labelled)` refuses an unknown metric, a metric for another task, one that
 needs labels on a dataset without a target, and one that needs probabilities or scores the model cannot produce. A
@@ -797,7 +809,8 @@ diagnostic describes a model's outputs, not its quality, so experiments, AutoML 
 
 **Undefined values** are refused as `undefined_metric`, never reported as NaN: MASE with an empty or zero seasonal-naive
 scale; the anomaly metrics on a partition without both normal and anomalous rows; the embedding metrics with fewer than two
-rows or a zero or non-finite vector; the retrieval metrics when no row shares its label with another row.
+rows or a zero or non-finite vector; the retrieval metrics when no row shares its label with another row; `wer` and `cer`
+when every reference transcript is empty after normalisation.
 
 The new metrics are pure Python functions (`smape`, `mase`, `anomaly_roc_auc`, `average_precision`, `anomaly_scores`,
 `threshold_calibration_error`, `retrieval_scores`, `mean_pairwise_cosine`) with hand-computed tests. No M1 runner computes
@@ -856,5 +869,5 @@ v1 requests keep their meaning, but these differences reach Phase 3 callers:
 
 M1 built the vocabulary only. Later milestones add the backends that use it; section 13 lists them as they land. At the end of
 M1, no backend implemented a task other than classification and regression or took a non-tabular feature column, and no runner
-decoded media or computed the new metrics. `transcription` and its metrics are not defined yet. No database migration was
+decoded media or computed the new metrics. `transcription` and its metrics were added in M8. No database migration was
 needed: the new snapshot fields and the embedding digest fit the existing JSON columns.

@@ -73,6 +73,7 @@ export abstract class RunnerBackend implements MlBackend {
       const target = schema.columns.find(c => c.name === schema.target);
       if (!target && task.target === "required") throw new ConflictError(`${model.taskType} requires a target`);
       if (target && !task.targetTypes.includes(target.type)) throw new ConflictError("Target type is not supported for this task");
+      if (model.taskType === "transcription" && target?.nullable) throw new ConflictError("Transcription needs a non-nullable reference transcript");
       if (!task.splits.includes(snapshot.split.strategy)) throw new ConflictError("Split strategy is not supported for this task");
       if (snapshot.evaluation.cv && snapshot.split.strategy === "chronological") throw new ConflictError("Cross-validation is not supported with a chronological split");
       if (snapshot.evaluation.cv && !task.crossValidation) throw new ConflictError("Cross-validation is not supported for this task");

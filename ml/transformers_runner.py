@@ -1,5 +1,6 @@
-"""Hugging Face Transformers backend (CPU, fp32): pretrained text and vision models provisioned under a platform-wide
-model root, used as fixed classifiers and encoders, or as frozen encoders under a trained softmax head (linear_heads).
+"""Hugging Face Transformers backend (CPU, fp32): pretrained text, vision and audio models provisioned under a platform-wide
+model root, used as fixed classifiers, encoders and a speech recogniser, or as frozen encoders under a trained softmax head
+(linear_heads). Audio clips are decoded by audio_common (the media_common walker) and resampled to the model's rate.
 
 The runner never downloads anything and never runs remote code. Every command that touches a model verifies the
 provisioned directory against its manifest and loads only a private per-call copy (transformers_manifest.verified_copy).
@@ -41,8 +42,10 @@ import torch
 import transformers
 from PIL import Image
 from transformers import (BertForSequenceClassification, BertModel, BertTokenizer, DistilBertForSequenceClassification, DistilBertModel,
-                          DistilBertTokenizer, ViTForImageClassification, ViTImageProcessorPil, ViTModel)
+                          DistilBertTokenizer, ViTForImageClassification, ViTImageProcessorPil, ViTModel, Wav2Vec2FeatureExtractor,
+                          Wav2Vec2ForCTC, Wav2Vec2ForSequenceClassification, Wav2Vec2Processor)
 
+import audio_common
 import linear_heads
 import media_common
 import ml_runtime_common as common
@@ -63,7 +66,9 @@ MAX_PARAMETERS = 400_000_000
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 RunnerError = common.RunnerError
 
-TEXT_FAMILIES, IMAGE_FAMILIES = frozenset({"bert", "distilbert"}), frozenset({"vit"})
+TEXT_FAMILIES, IMAGE_FAMILIES, AUDIO_FAMILIES = frozenset({"bert", "distilbert"}), frozenset({"vit"}), frozenset({"wav2vec2"})
+FAMILIES = {"text": TEXT_FAMILIES, "image": IMAGE_FAMILIES, "audio": AUDIO_FAMILIES}
+MAX_TRANSCRIPT_CHARS = 10_000
 # Mirrors src/ml/transformers-models.ts.
 MODELS = {
     "text_classifier": {"task": "classification", "modality": "text", "learning": "pretrained", "kind": "text-classifier"},
@@ -72,11 +77,14 @@ MODELS = {
     "image_classifier": {"task": "classification", "modality": "image", "learning": "pretrained", "kind": "image-classifier"},
     "image_embedder": {"task": "embedding", "modality": "image", "learning": "pretrained", "kind": "image-encoder"},
     "image_embedding_classifier": {"task": "classification", "modality": "image", "learning": "supervised", "kind": "image-encoder"},
+    "audio_classifier": {"task": "classification", "modality": "audio", "learning": "pretrained", "kind": "audio-classifier"},
+    "speech_recognizer": {"task": "transcription", "modality": "audio", "learning": "pretrained", "kind": "speech-ctc"},
 }
 # Concrete classes per (kind, family); encoders load without a pooling layer, since embeddings come from the hidden states.
 CLASSES = {("text-encoder", "bert"): (BertModel, {"add_pooling_layer": False}), ("text-encoder", "distilbert"): (DistilBertModel, {}),
            ("text-classifier", "bert"): (BertForSequenceClassification, {}), ("text-classifier", "distilbert"): (DistilBertForSequenceClassification, {}),
-           ("image-encoder", "vit"): (ViTModel, {"add_pooling_layer": False}), ("image-classifier", "vit"): (ViTForImageClassification, {})}
+           ("image-encoder", "vit"): (ViTModel, {"add_pooling_layer": False}), ("image-classifier", "vit"): (ViTForImageClassification, {}),
+           ("audio-classifier", "wav2vec2"): (Wav2Vec2ForSequenceClassification, {}), ("speech-ctc", "wav2vec2"): (Wav2Vec2ForCTC, {})}
 TOKENIZERS = {"bert": BertTokenizer, "distilbert": DistilBertTokenizer}
 # name: (kind, low, high, default) or (kind, choices, default). Mirrors the TypeScript catalog; enforced again here.
 SHARED = {"model": ("name",), "batchSize": ("int", 1, 64, 16)}
@@ -89,13 +97,16 @@ PARAMETERS = {
     "image_classifier": dict(SHARED),
     "image_embedder": {**SHARED, "pooling": ("choice", ("cls", "mean"), "cls"), "normalize": ("bool", True)},
     "image_embedding_classifier": {**SHARED, "pooling": ("choice", ("cls", "mean"), "cls"), **HEAD},
+    # Audio is forwarded one clip at a time (forward_audio), so it has no batch size.
+    "audio_classifier": {"model": ("name",)},
+    "speech_recognizer": {"model": ("name",)},
 }
 FIXED = {"pretrained_model_unavailable": "The pretrained model is not provisioned",
          "pretrained_model_mismatch": "The provisioned model does not match its manifest or this model"}
 
 
 def environment():
-    return common.base_environment([__file__, common.__file__, media_common.__file__, linear_heads.__file__, transformers_manifest.__file__],
+    return common.base_environment([__file__, common.__file__, media_common.__file__, audio_common.__file__, linear_heads.__file__, transformers_manifest.__file__],
                                    BACKEND, ARTIFACT_FORMAT, ARTIFACT_SCHEMA, PROTOCOL,
                                    {"torch": torch.__version__, "transformers": transformers.__version__, "tokenizers": tokenizers.__version__,
                                     "safetensors": safetensors.__version__, "pillow": PIL.__version__, "numpy": np.__version__, "scipy": scipy.__version__,
@@ -157,7 +168,7 @@ class Pretrained:
     def __init__(self, root, algorithm, name, seed):
         entry = MODELS[algorithm]
         self.work = tempfile.mkdtemp(prefix="meticule-model-")
-        families = TEXT_FAMILIES if entry["modality"] == "text" else IMAGE_FAMILIES
+        families = FAMILIES[entry["modality"]]
         try:
             self.info = transformers_manifest.verified_copy(root, name, {entry["kind"]}, families, self.work)
         except transformers_manifest.ManifestError as error:
@@ -182,8 +193,14 @@ class Pretrained:
             self.model.eval()
             if entry["modality"] == "text":
                 self.tokenizer = TOKENIZERS[self.info["family"]].from_pretrained(self.work, local_files_only=True)
-            else:
+            elif entry["modality"] == "image":
                 self.processor = ViTImageProcessorPil.from_pretrained(self.work, local_files_only=True)
+            elif self.info["kind"] == "speech-ctc":
+                self.processor = Wav2Vec2Processor.from_pretrained(self.work, local_files_only=True)
+                self.rate = int(self.processor.feature_extractor.sampling_rate)
+            else:
+                self.processor = Wav2Vec2FeatureExtractor.from_pretrained(self.work, local_files_only=True)
+                self.rate = int(self.processor.sampling_rate)
         except RunnerError:
             raise
         except Exception:
@@ -242,12 +259,45 @@ def forward_images(loaded, cells, hp):
             yield loaded.model(pixel_values=pixels), None  # images have no padding: every patch token is real
 
 
+def clips(loaded, cells):
+    """Mono float32 clips at the model's sampling rate; the walker enforces the 0.1..30 s and format rules (C3)."""
+    if not 8000 <= loaded.rate <= 48000:
+        raise RunnerError("pretrained_model_mismatch", FIXED["pretrained_model_mismatch"])
+    return [audio_common.decode(cell, loaded.rate) for cell in cells]
+
+
+def forward_audio(loaded, cells, hp):
+    """One clip per forward pass: zero padding changes a group-norm wav2vec2's outputs, so a batched clip's scores would
+    depend on the other clips in its request."""
+    for clip in clips(loaded, cells):
+        inputs = loaded.processor(clip, sampling_rate=loaded.rate, return_tensors="pt")
+        with torch.no_grad():
+            yield loaded.model(input_values=inputs["input_values"]), None
+
+
+FORWARD = {"text": forward_text, "image": forward_images, "audio": forward_audio}
+
+
+def transcribe(loaded, cells):
+    """Greedy CTC decoding, one clip per forward pass."""
+    transcripts = []
+    for clip in clips(loaded, cells):
+        inputs = loaded.processor(clip, sampling_rate=loaded.rate, return_tensors="pt")
+        with torch.no_grad():
+            ids = loaded.model(input_values=inputs["input_values"]).logits.argmax(dim=-1)
+        text = loaded.processor.batch_decode(ids)[0]
+        if len(text) > MAX_TRANSCRIPT_CHARS:
+            raise ValueError("Transcript exceeds the output bound")
+        transcripts.append(text)
+    return transcripts
+
+
 def embeddings(loaded, values, hp, modality):
     """Pooled hidden states: mean over real tokens (text: attention mask; images: every patch token) or the first token."""
     if not values:
         return np.zeros((0, int(getattr(loaded.config, "hidden_size", getattr(loaded.config, "dim", 0)))))
     chunks = []
-    for output, mask in (forward_text if modality == "text" else forward_images)(loaded, values, hp):
+    for output, mask in FORWARD[modality](loaded, values, hp):
         hidden = output.last_hidden_state
         if hp["pooling"] == "cls":
             pooled = hidden[:, 0]
@@ -271,8 +321,7 @@ def class_probabilities(loaded, values, hp, modality):
     """The pretrained head's softmax over its own labels."""
     if not values:
         return np.zeros((0, len(loaded.labels())))
-    chunks = [scipy.special.softmax(output.logits.numpy().astype(np.float64), axis=1) for output, _ in
-              (forward_text if modality == "text" else forward_images)(loaded, values, hp)]
+    chunks = [scipy.special.softmax(output.logits.numpy().astype(np.float64), axis=1) for output, _ in FORWARD[modality](loaded, values, hp)]
     return np.vstack(chunks)
 
 
@@ -329,6 +378,8 @@ def outputs(bundle, values):
     """Predictions (labels or vectors) plus, for classifiers, probabilities in sorted class order for metrics."""
     algorithm = bundle.document["algorithm"]
     entry, hp = MODELS[algorithm], bundle.hp()
+    if entry["task"] == "transcription":
+        return {"transcripts": transcribe(bundle.loaded, values)}
     if entry["task"] == "embedding":
         vectors = embeddings(bundle.loaded, values, hp, entry["modality"])
         return {"vectors": vectors}
@@ -345,6 +396,8 @@ def outputs(bundle, values):
 
 
 def measure(names, task, y, labelled, result):
+    if task == "transcription":
+        return {name: (common.wer if name == "wer" else common.cer)(list(y), result["transcripts"]) for name in names}
     if task == "embedding":
         return common.embedding_metrics(names, result["vectors"], y if labelled else None)
     return common.measure_predictions(names, y, result["prediction"], proba=result["proba"], scores=result["proba"], classes=result["classes"])
@@ -388,6 +441,10 @@ def execute(request):
                 if not {str(row[target]) for row in rows} <= set(labels) or any(not isinstance(row[target], str) for row in rows):
                     raise RunnerError("pretrained_label_mismatch", "Dataset classes are not labels of the pretrained model")
                 document["labels"] = labels
+            elif entry["task"] == "transcription":
+                # A pretrained recogniser fits nothing; the targets are the reference transcripts its metrics compare with.
+                if any(not isinstance(row[target], str) for row in rows):
+                    raise ValueError("Reference transcripts must be text")
             elif entry["task"] == "embedding":
                 sample = [rows[indices["train"][0]][column]]
                 document["embeddingDimension"] = int(embeddings(loaded, sample, hp, entry["modality"]).shape[1])
@@ -412,6 +469,8 @@ def execute(request):
         try:
             if command == "predict":
                 result = outputs(bundle, [row[column] for row in rows])
+                if entry["task"] == "transcription":
+                    return {"predictions": result["transcripts"]}
                 return {"predictions": result["vectors"].tolist() if entry["task"] == "embedding" else result["prediction"].tolist()}
             names = common.requested_metrics(spec, entry["task"], labelled)
             y = np.array([row[target] for row in rows]) if labelled else None

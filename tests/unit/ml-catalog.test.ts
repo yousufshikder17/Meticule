@@ -86,9 +86,9 @@ describe("model catalog", () => {
       }
     }
   });
-  it("registers every M1 metric with its tasks, label need and diagnostics, and defaults per task and labelling", () => {
+  it("registers every Phase 4 metric with its tasks, label need and diagnostics, and defaults per task and labelling", () => {
     expect(Object.keys(METRICS).sort()).toEqual(["accuracy", "anomaly_f1", "anomaly_precision", "anomaly_recall", "average_precision", "f1", "log_loss", "mae", "mase", "mean_pairwise_cosine", "mse", "precision", "r2",
-      "recall", "retrieval_mrr", "retrieval_precision_at_1", "rmse", "roc_auc", "smape", "threshold_calibration_error"]);
+      "recall", "retrieval_mrr", "retrieval_precision_at_1", "rmse", "roc_auc", "smape", "threshold_calibration_error", "wer", "cer"].sort());
     expect(METRICS.roc_auc).toEqual({ tasks: ["classification", "anomaly_detection"], direction: "higher", needs: "scores", labels: true });
     expect(METRICS.mae.tasks).toEqual(["regression", "forecasting"]);
     expect((Object.keys(METRICS) as MetricName[]).filter(n => !METRICS[n].labels)).toEqual(["threshold_calibration_error", "mean_pairwise_cosine"]);
@@ -97,7 +97,9 @@ describe("model catalog", () => {
     expect(defaultMetrics("forecasting", true)).toEqual(["mae", "rmse"]);
     expect([defaultMetrics("anomaly_detection", true), defaultMetrics("anomaly_detection", false)]).toEqual([["average_precision"], ["threshold_calibration_error"]]);
     expect([defaultMetrics("embedding", true), defaultMetrics("embedding", false)]).toEqual([["retrieval_precision_at_1"], ["mean_pairwise_cosine"]]);
-    for (const task of ["classification", "regression", "forecasting"] as const) expect(() => defaultMetrics(task, false)).toThrow(/requires a target/);
+    expect(METRICS.wer).toEqual({ tasks: ["transcription"], direction: "lower", labels: true });
+    expect(defaultMetrics("transcription", true)).toEqual(["wer", "cer"]);
+    for (const task of ["classification", "regression", "forecasting", "transcription"] as const) expect(() => defaultMetrics(task, false)).toThrow(/requires a target/);
   });
   it("refuses metrics that need labels an unlabelled dataset lacks, and diagnostics as ranking metrics", () => {
     const detector = defineModel({ backend: "test", id: "detector", taskType: "anomaly_detection", displayName: "Detector", parameters: {}, capabilities: scored, learning: "unsupervised" });

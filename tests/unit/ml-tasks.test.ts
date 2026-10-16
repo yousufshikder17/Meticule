@@ -16,8 +16,8 @@ const snapshotOf = (row: TableRow) => snapshotFor({
 });
 
 describe("task registry", () => {
-  it("defines the M1 tasks and the rules each one imposes (spec sec. 4)", () => {
-    expect(TASK_TYPES).toEqual(["classification", "regression", "forecasting", "anomaly_detection", "embedding"]);
+  it("defines the Phase 4 tasks and the rules each one imposes (spec sec. 4)", () => {
+    expect(TASK_TYPES).toEqual(["classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription"]);
     const rules = Object.fromEntries(TASK_TYPES.map(task => { const { output: _, ...rest } = TASKS[task]; return [task, rest]; }));
     const both = ["random", "chronological"];
     expect(rules).toEqual({
@@ -26,6 +26,7 @@ describe("task registry", () => {
       forecasting: { target: "required", targetTypes: ["number"], splits: ["chronological"], crossValidation: false, predictionIncludesTarget: true, outputs: "horizon", maxPredictionRows: 5000 },
       anomaly_detection: { target: "optional", targetTypes: ["boolean"], splits: both, crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 1000 },
       embedding: { target: "optional", targetTypes: ["number", "string", "boolean"], splits: both, crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 256 },
+      transcription: { target: "required", targetTypes: ["text"], splits: ["random"], crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 8 },
     });
   });
 
@@ -34,14 +35,14 @@ describe("task registry", () => {
     const accepted: Record<TaskType, unknown[]> = {
       classification: ["spam", 3, false, "x".repeat(10_000)], regression: [0, -1.5, 1e300],
       forecasting: [step, { ...step, step: 100 }], anomaly_detection: [{ score: -0.2, anomaly: false }, { score: 3, anomaly: true }],
-      embedding: [[0.25], [0, -1, 2], new Array(4096).fill(0.5)],
+      embedding: [[0.25], [0, -1, 2], new Array(4096).fill(0.5)], transcription: ["", "hello world", "x".repeat(10_000)],
     };
     const refused: Record<TaskType, unknown[]> = {
       classification: [null, {}, [], Number.NaN, Number.POSITIVE_INFINITY, "x".repeat(10_001)],
       regression: ["1", true, null, Number.NaN, Number.NEGATIVE_INFINITY],
       forecasting: [{ ...step, step: 0 }, { ...step, step: 1.5 }, { ...step, timestamp: "2024-03-01T00:00:00" }, { ...step, timestamp: "2024-02-30T00:00:00Z" }, { ...step, value: Number.NaN }, { ...step, extra: 1 }, { step: 1, value: 1 }],
       anomaly_detection: [{ score: 1 }, { score: Number.NaN, anomaly: true }, { score: 1, anomaly: 1 }, { score: 1, anomaly: true, label: "x" }, 0.5],
-      embedding: [[], new Array(4097).fill(0), [Number.NaN], ["1"], 0.5],
+      embedding: [[], new Array(4097).fill(0), [Number.NaN], ["1"], 0.5], transcription: [null, 1, ["a"], "x".repeat(10_001)],
     };
     for (const task of TASK_TYPES) {
       for (const value of accepted[task]) expect(TASKS[task].output.safeParse(value).success, `${task} accepts ${JSON.stringify(value)?.slice(0, 40)}`).toBe(true);
@@ -58,6 +59,7 @@ describe("task registry", () => {
     expect(maxPredictionRows("embedding", ["text", "image"])).toBe(32);
     expect(maxPredictionRows("regression", ["image", "audio"])).toBe(16);
     expect(maxPredictionRows("forecasting", ["timestamp", "number"])).toBe(5000);
+    expect(maxPredictionRows("transcription", ["audio"])).toBe(8);
   });
 });
 

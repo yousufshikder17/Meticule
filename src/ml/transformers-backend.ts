@@ -16,7 +16,7 @@ export const TRANSFORMERS_ARTIFACT_FORMAT = "transformers-reference-v1";
  */
 export class TransformersBackend extends RunnerBackend {
   constructor(python: string, private readonly modelRoot: string, timeoutMs = 120_000, script = resolve(process.cwd(), "ml/transformers_runner.py")) {
-    const capabilities: BackendCapabilities = { artifactFormats: [TRANSFORMERS_ARTIFACT_FORMAT], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: [], iterative: false, tasks: ["classification", "embedding"], inputs: ["text", "image"] };
+    const capabilities: BackendCapabilities = { artifactFormats: [TRANSFORMERS_ARTIFACT_FORMAT], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: [], iterative: false, tasks: ["classification", "embedding", "transcription"], inputs: ["text", "image", "audio"] };
     super({ id: "transformers", capabilities, python, script, timeoutMs });
   }
   override validate(snapshot: Snapshot): void {

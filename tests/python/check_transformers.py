@@ -166,6 +166,37 @@ results["changed_model_digest_refused_at_predict"] = refusal(lambda: run("predic
 results["foreign_runtime_artifact_refused"] = refusal(lambda: run("predict", s, text_rows[:2], artifact=trained["artifact"], expectedEnvironment={**trained["environment"], "transformers": "0.0.1"})) == "incompatible_artifact"
 results["tampered_artifact_refused"] = refusal(lambda: run("predict", s, text_rows[:2], artifact=base64.b64encode(b"{\"schema\": 1}").decode())) == "incompatible_artifact"
 
+# Audio (M8): a pretrained wav2vec2 classifier binds its labels; a CTC recogniser decodes greedily. The CTC fixture's bias
+# forces every clip to "h", so WER and CER have known values. Tiny random models: the path, not recognition quality.
+def wav_cell(freq, seconds=0.3, rate=16000):
+    t = np.arange(int(rate * seconds)) / rate
+    data = (0.5 * np.sin(2 * np.pi * freq * t) * 32767).astype("<i2").tobytes()
+    header = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(data))
+    return base64.b64encode(header + data).decode()
+
+
+tones = [{"x": wav_cell(250 + 20 * (i % 5) if i % 2 else 2500 + 50 * (i % 5)), "label": "low" if i % 2 else "high"} for i in range(20)]
+audio_cls = spec("audio_classifier", "audio", True, {"model": "tiny-wav2vec2-tones"}, ["accuracy"])
+_, audio_trained, _ = lifecycle(audio_cls, tones)
+audio_labels = run("predict", audio_cls, tones[:5], artifact=audio_trained["artifact"])["predictions"]
+results["audio_classifier_binds_labels_and_outputs_them"] = json.loads(base64.b64decode(audio_trained["artifact"]))["labels"] == ["low", "high"] and set(audio_labels) <= {"low", "high"}
+results["audio_classifier_label_mismatch_refused"] = refusal(lambda: run("train", audio_cls, [{**t, "label": "middle"} for t in tones], prepared=run("prepare", audio_cls, tones))) == "pretrained_label_mismatch"
+bundle = tb.Bundle(json.loads(base64.b64decode(audio_trained["artifact"])), root, 1)
+try:  # zero padding changes a group-norm wav2vec2's outputs, so a clip must give the same scores alone and beside a longer one
+    alone = tb.outputs(bundle, [wav_cell(250, 0.2)])["proba"][0]
+    results["audio_rows_do_not_depend_on_their_batch"] = np.array_equal(alone, tb.outputs(bundle, [wav_cell(2600, 1.5), wav_cell(250, 0.2)])["proba"][1])
+finally:
+    bundle.loaded.close()
+speech = spec("speech_recognizer", "audio", True, {"model": "tiny-wav2vec2-ctc"}, ["wer", "cer"], target_type="text")
+said = [{"x": wav_cell(300 + 40 * i), "label": ["h", "hi", "a b"][i % 3]} for i in range(15)]
+_, speech_trained, speech_eval = lifecycle(speech, said)
+transcripts = run("predict", speech, said[:4], artifact=speech_trained["artifact"])["predictions"]
+results["ctc_decodes_the_forced_transcript"] = transcripts == ["h", "h", "h", "h"]
+results["speech_is_deterministic"] = run("predict", speech, said[:4], artifact=speech_trained["artifact"])["predictions"] == transcripts
+results["speech_lifecycle_reports_wer_and_cer"] = {m["name"] for m in speech_eval["metrics"]} == {"wer", "cer"} and all(0 <= m["value"] for m in speech_eval["metrics"])
+results["undecodable_or_too_short_audio_refused"] = (refusal(lambda: run("predict", speech, [{"x": base64.b64encode(b"RIFF").decode()}], artifact=speech_trained["artifact"])) == "invalid_media"
+                                                     and refusal(lambda: run("predict", speech, [{"x": wav_cell(300, seconds=0.01)}], artifact=speech_trained["artifact"])) == "invalid_media")
+
 # No network: every socket is refused during a full train/evaluate/predict cycle, and nothing is written to HF_HOME.
 real_socket = socket.socket
 

@@ -10,7 +10,7 @@ it.runIf(Boolean(hfPython))("real transformers runner: provisioning refusals, la
   expect(Object.entries(out.results).filter(([, value]) => value !== true).map(([name]) => name)).toEqual([]);
   // One reparse-point variant runs on every OS: a symlink, or a directory junction where Windows refuses symlinks.
   expect(out.details.skipped.length).toBeLessThanOrEqual(1);
-  expect(Object.keys(out.results)).toHaveLength(45); // a dropped check must fail the suite, not pass quietly
+  expect(Object.keys(out.results)).toHaveLength(52); // a dropped check must fail the suite, not pass quietly
 }, 900_000);
 
 // The dedicated transformers CI job sets ML_TRANSFORMERS_JOB. Only that job must provide the pinned CPU runtime.

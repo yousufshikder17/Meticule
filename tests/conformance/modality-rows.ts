@@ -27,6 +27,8 @@ export function wav(frequency: number, seconds = 0.3, rate = 16000, amplitude = 
   header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write("data", 36, "ascii"); header.writeUInt32LE(data.length, 40);
   return Buffer.concat([header, data]).toString("base64");
 }
+/** Clips with reference transcripts (text) for speech recognition. */
+export const SPEECH_ROWS: Row[] = Array.from({ length: 24 }, (_, i) => ({ x: wav(300 + 30 * i), label: ["h", "hi", "a b"][i % 3]! }));
 export const AUDIO_ROWS: Row[] = Array.from({ length: 30 }, (_, i) => ({ x: i % 2 ? wav(200 + 15 * (i % 7)) : wav(2500 + 40 * (i % 7)), label: i % 2 ? "low" : "high" }));
 
 /** A deterministic hourly AR(1)-like series (timestamp + value) for forecasting; no randomness, so every runtime agrees. */

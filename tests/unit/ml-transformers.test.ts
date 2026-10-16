@@ -15,9 +15,10 @@ const text = (algorithm: string, hyperparameters: Record<string, unknown> = { mo
   snapshotFor({ backend: "transformers", algorithm, columns: [{ name: "x", type: "text" }, { name: "label", type: "string" }], target: "label", features: ["x"], hyperparameters, ...opts });
 
 describe("transformers catalog (Phase 4 M4)", () => {
-  it("registers six single-input text and image models with honest learning modes and scores", () => {
+  it("registers eight single-input text, image and audio models with honest learning modes and scores", () => {
     const models = Object.fromEntries(listModels("transformers").map(m => [m.id, m]));
-    expect(Object.keys(models).sort()).toEqual(["image_classifier", "image_embedder", "image_embedding_classifier", "text_classifier", "text_embedder", "text_embedding_classifier"]);
+    expect(Object.keys(models).sort()).toEqual(["audio_classifier", "image_classifier", "image_embedder", "image_embedding_classifier", "speech_recognizer", "text_classifier", "text_embedder", "text_embedding_classifier"]);
+    expect(models.speech_recognizer).toMatchObject({ taskType: "transcription", learning: "pretrained", inputs: { types: ["audio"], min: 1, max: 1 } });
     expect(models.text_classifier).toMatchObject({ taskType: "classification", learning: "pretrained", inputs: { types: ["text"], min: 1, max: 1 } });
     expect(models.image_embedder).toMatchObject({ taskType: "embedding", learning: "pretrained", inputs: { types: ["image"], min: 1, max: 1 } });
     expect(models.text_embedding_classifier!.learning).toBe("supervised");
@@ -33,7 +34,7 @@ describe("transformers catalog (Phase 4 M4)", () => {
 describe("transformers backend validation", () => {
   const backend = new TransformersBackend("unused", root);
   it("declares CPU, fp32, one-shot, classification and embedding over text and image, no tabular preprocessing", () => {
-    expect(backend.capabilities).toMatchObject({ artifactFormats: ["transformers-reference-v1"], devices: ["cpu"], precisions: ["fp32"], iterative: false, preprocessing: [], tasks: ["classification", "embedding"], inputs: ["text", "image"] });
+    expect(backend.capabilities).toMatchObject({ artifactFormats: ["transformers-reference-v1"], devices: ["cpu"], precisions: ["fp32"], iterative: false, preprocessing: [], tasks: ["classification", "embedding", "transcription"], inputs: ["text", "image", "audio"] });
     expect(() => backend.validate(text("text_embedder"))).not.toThrow();
   });
   it("requires a provisioned model name, a text feature, and no preprocessing", () => {

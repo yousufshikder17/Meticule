@@ -35,6 +35,9 @@ const definitions = {
   retrieval_precision_at_1: { tasks: ["embedding"], direction: "higher", labels: true },
   retrieval_mrr: { tasks: ["embedding"], direction: "higher", labels: true },
   mean_pairwise_cosine: { tasks: ["embedding"], direction: "lower", labels: false, diagnostic: true }, // anisotropy
+  // Corpus-level: summed edits over summed reference length, on lower-cased whitespace-collapsed text; refused when empty.
+  wer: { tasks: ["transcription"], direction: "lower", labels: true },
+  cer: { tasks: ["transcription"], direction: "lower", labels: true },
 } as const satisfies Record<string, MetricDefinition>;
 export type MetricName = keyof typeof definitions;
 export const METRICS: Readonly<Record<MetricName, MetricDefinition>> = definitions;
@@ -47,6 +50,7 @@ const DEFAULTS: Readonly<Record<TaskType, { labelled: readonly MetricName[]; unl
   forecasting: { labelled: ["mae", "rmse"], unlabelled: null },
   anomaly_detection: { labelled: ["average_precision"], unlabelled: ["threshold_calibration_error"] },
   embedding: { labelled: ["retrieval_precision_at_1"], unlabelled: ["mean_pairwise_cosine"] },
+  transcription: { labelled: ["wer", "cer"], unlabelled: null },
 };
 export function defaultMetrics(task: TaskType, labelled: boolean): MetricName[] {
   const chosen = labelled ? DEFAULTS[task].labelled : DEFAULTS[task].unlabelled;

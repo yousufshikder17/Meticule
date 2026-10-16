@@ -55,8 +55,10 @@ METRICS = {
     "retrieval_precision_at_1": (("embedding",), "higher", True, False),
     "retrieval_mrr": (("embedding",), "higher", True, False),
     "mean_pairwise_cosine": (("embedding",), "lower", False, True),
+    "wer": (("transcription",), "lower", True, False),
+    "cer": (("transcription",), "lower", True, False),
 }
-TASKS = ("classification", "regression", "forecasting", "anomaly_detection", "embedding")
+TASKS = ("classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription")
 DIRECTIONS = {name: metric[1] for name, metric in METRICS.items()}
 TASK_METRICS = {task: tuple(name for name, metric in METRICS.items() if task in metric[0]) for task in TASKS}
 LABEL_FREE = frozenset(name for name, metric in METRICS.items() if not metric[2])
@@ -65,7 +67,8 @@ DIAGNOSTIC = frozenset(name for name, metric in METRICS.items() if metric[3])
 DEFAULTS = {"classification": (("accuracy",), None), "regression": (("mae", "mse"), None),
             "forecasting": (("mae", "rmse"), None),
             "anomaly_detection": (("average_precision",), ("threshold_calibration_error",)),
-            "embedding": (("retrieval_precision_at_1",), ("mean_pairwise_cosine",))}
+            "embedding": (("retrieval_precision_at_1",), ("mean_pairwise_cosine",)),
+            "transcription": (("wer", "cer"), None)}
 
 
 class IncompatibleArtifact(ValueError):
@@ -456,3 +459,48 @@ def embedding_metrics(names, vectors, labels):
         else:
             raise ValueError("Metric does not apply to embeddings")
     return values
+
+
+def normalise_transcript(text):
+    """Lower-cased, whitespace-collapsed text: the form wer and cer compare."""
+    return " ".join(str(text).lower().split())
+
+
+def levenshtein(a, b):
+    """Edit distance between two sequences (insertions, deletions, substitutions cost 1). Row by row, each row in NumPy:
+    cur[j] = min(base[j], cur[j-1] + 1) unrolls to a running minimum of base[k] - k, so a row is one accumulate."""
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+    symbols = {}
+    codes = np.array([symbols.setdefault(x, len(symbols)) for x in b])
+    index = np.arange(len(b) + 1)
+    previous = index.copy()
+    for i, x in enumerate(a, 1):
+        base = np.empty(len(b) + 1, dtype=np.int64)
+        base[0] = i
+        base[1:] = np.minimum(previous[1:] + 1, previous[:-1] + (codes != symbols.get(x, -1)))
+        previous = np.minimum.accumulate(base - index) + index
+    return int(previous[-1])
+
+
+def _error_rate(references, hypotheses, split):
+    edits = total = 0
+    for reference, hypothesis in zip(references, hypotheses):
+        ref, hyp = split(normalise_transcript(reference)), split(normalise_transcript(hypothesis))
+        edits += levenshtein(ref, hyp)
+        total += len(ref)
+    if total == 0:
+        raise RunnerError("undefined_metric", "Error rates are undefined: the references are empty")
+    return float(edits / total)
+
+
+def wer(references, hypotheses):
+    """Corpus word error rate: summed word edits over summed reference words (normalised text)."""
+    return _error_rate(references, hypotheses, str.split)
+
+
+def cer(references, hypotheses):
+    """Corpus character error rate: summed character edits (spaces included) over summed reference characters."""
+    return _error_rate(references, hypotheses, list)

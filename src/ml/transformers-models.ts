@@ -14,8 +14,9 @@ const imagePooling: ParameterSpec = { kind: "choice", values: ["cls", "mean"], d
 const normalize: ParameterSpec = { kind: "bool", default: true };
 const TEXT: ModelInputs = { types: ["text"], min: 1, max: 1 };
 const IMAGE: ModelInputs = { types: ["image"], min: 1, max: 1 };
+const AUDIO: ModelInputs = { types: ["audio"], min: 1, max: 1 };
 const capabilities = (scores: "probability" | "none") => ({ scores, scaleSensitive: false, seeded: false, iterative: false, devices: ["cpu"], mixedPrecision: false } as const);
-const define = (id: string, taskType: "classification" | "embedding", displayName: string, inputs: ModelInputs, learning: "pretrained" | "supervised", parameters: Record<string, ParameterSpec>) =>
+const define = (id: string, taskType: "classification" | "embedding" | "transcription", displayName: string, inputs: ModelInputs, learning: "pretrained" | "supervised", parameters: Record<string, ParameterSpec>) =>
   defineModel({ backend: "transformers", id, taskType, displayName, inputs, learning, parameters, capabilities: capabilities(taskType === "classification" ? "probability" : "none") });
 
 export const TRANSFORMERS_MODELS: readonly ModelDefinition[] = [
@@ -25,6 +26,9 @@ export const TRANSFORMERS_MODELS: readonly ModelDefinition[] = [
   define("image_classifier", "classification", "Pretrained image classifier (ViT)", IMAGE, "pretrained", { model, batchSize }),
   define("image_embedder", "embedding", "Image embeddings (ViT)", IMAGE, "pretrained", { model, batchSize, pooling: imagePooling, normalize }),
   define("image_embedding_classifier", "classification", "Softmax head over a frozen image encoder", IMAGE, "supervised", { model, batchSize, pooling: imagePooling, ...head }),
+  // Audio (wav2vec2) is forwarded one clip at a time, so no batch size; speech decodes greedily (CTC).
+  define("audio_classifier", "classification", "Pretrained audio classifier (wav2vec2)", AUDIO, "pretrained", { model }),
+  define("speech_recognizer", "transcription", "Speech recognition (wav2vec2 CTC, greedy)", AUDIO, "pretrained", { model }),
 ];
 
 registerModels(TRANSFORMERS_MODELS);

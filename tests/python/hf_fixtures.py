@@ -4,7 +4,8 @@
 
 Good models: tiny BERT/DistilBERT encoders and sequence classifiers (labels negative/positive) with a small WordPiece vocabulary
 and model_max_length set; tiny ViT encoder and classifier (labels red/blue) with a 32x32 PIL image processor; a BERT encoder
-whose config says bfloat16 (it must still run in fp32). Malicious variants of a good encoder exercise every provisioning refusal.
+whose config says bfloat16 (it must still run in fp32); a tiny wav2vec2 audio classifier (labels low/high) and a wav2vec2 CTC
+model whose output bias forces every clip to decode to the transcript "h" (so WER and CER have known values). Malicious variants of a good encoder exercise every provisioning refusal.
 These models are random: they prove the execution path, not semantic quality.
 """
 import json
@@ -18,7 +19,8 @@ import torch  # noqa: E402
 import transformers  # noqa: E402
 from transformers import (BertConfig, BertForSequenceClassification, BertModel, BertTokenizer, DistilBertConfig,  # noqa: E402
                           DistilBertForSequenceClassification, DistilBertModel, DistilBertTokenizer, ViTConfig, ViTForImageClassification,
-                          ViTImageProcessorPil, ViTModel)
+                          ViTImageProcessorPil, ViTModel, Wav2Vec2Config, Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2ForCTC,
+                          Wav2Vec2ForSequenceClassification, Wav2Vec2Processor)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ml"))
 import transformers_manifest  # noqa: E402
@@ -68,6 +70,39 @@ def image_model(root, name, kind, seed):
     return directory
 
 
+# A tiny wav2vec2 encoder: two convolutional layers (stride 20) and one transformer layer.
+WAV2VEC2 = dict(hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=20, conv_dim=(8, 8), conv_stride=(5, 4), conv_kernel=(10, 8),
+                num_conv_pos_embeddings=8, num_conv_pos_embedding_groups=2, do_stable_layer_norm=False, feat_extract_norm="group")
+CHARACTERS = {"<pad>": 0, "|": 1, "<unk>": 2, "a": 3, "b": 4, "c": 5, "h": 6, "i": 7}
+FORCED = "h"
+
+
+def audio_models(root):
+    """Writes the wav2vec2 classifier and the forced-transcript CTC model; returns their directories."""
+    extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, padding_value=0.0, do_normalize=True, return_attention_mask=False)
+    torch.manual_seed(8)
+    classifier = os.path.join(root, "tiny-wav2vec2-tones")
+    Wav2Vec2ForSequenceClassification(Wav2Vec2Config(num_labels=2, id2label={0: "low", 1: "high"}, label2id={"low": 0, "high": 1}, **WAV2VEC2)).save_pretrained(classifier)
+    extractor.save_pretrained(classifier)
+    transformers_manifest.write_manifest(classifier, "audio-classifier", "wav2vec2", "meticule-fixtures/tiny-wav2vec2-tones", "0" * 40, "apache-2.0")
+    torch.manual_seed(9)
+    ctc = os.path.join(root, "tiny-wav2vec2-ctc")
+    os.makedirs(ctc, exist_ok=True)
+    vocabulary = os.path.join(ctc, "vocab.json")
+    with open(vocabulary, "w", encoding="utf-8") as handle:
+        json.dump(CHARACTERS, handle)
+    tokenizer = Wav2Vec2CTCTokenizer(vocabulary, unk_token="<unk>", pad_token="<pad>", word_delimiter_token="|")
+    model = Wav2Vec2ForCTC(Wav2Vec2Config(vocab_size=len(CHARACTERS), pad_token_id=0, **WAV2VEC2))
+    with torch.no_grad():  # every frame's most likely token is FORCED, so greedy CTC decoding returns exactly FORCED
+        model.lm_head.weight.zero_()
+        model.lm_head.bias.fill_(-10.0)
+        model.lm_head.bias[CHARACTERS[FORCED]] = 10.0
+    model.save_pretrained(ctc)
+    Wav2Vec2Processor(feature_extractor=extractor, tokenizer=tokenizer).save_pretrained(ctc)
+    transformers_manifest.write_manifest(ctc, "speech-ctc", "wav2vec2", "meticule-fixtures/tiny-wav2vec2-ctc", "0" * 40, "apache-2.0")
+    return {"tiny-wav2vec2-tones": classifier, "tiny-wav2vec2-ctc": ctc}
+
+
 def rewrite_config(directory, change):
     path = os.path.join(directory, "config.json")
     with open(path, encoding="utf-8") as handle:
@@ -104,6 +139,7 @@ def build(root):
         "tiny-bert-bf16-encoder": text_model(root, "tiny-bert-bf16-encoder", "bert", "text-encoder", 5, dtype="bfloat16"),
         "tiny-vit-encoder": image_model(root, "tiny-vit-encoder", "image-encoder", 6),
         "tiny-vit-colours": image_model(root, "tiny-vit-colours", "image-classifier", 7),
+        **audio_models(root),
     }
     encoder = good["tiny-bert-encoder"]
     evil, skipped = {}, []

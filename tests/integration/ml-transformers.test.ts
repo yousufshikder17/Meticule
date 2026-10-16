@@ -12,7 +12,7 @@ import { MlTrainingService } from "../../src/ml/persistence.js";
 import { MlModelService } from "../../src/ml/model-service.js";
 import { TrainingProcessor } from "../../src/ml/training-processor.js";
 import { TransformersBackend } from "../../src/ml/transformers-backend.js";
-import { IMAGE_ROWS, TEXT_ROWS } from "../conformance/modality-rows.js";
+import { AUDIO_ROWS, IMAGE_ROWS, SPEECH_ROWS, TEXT_ROWS, wav } from "../conformance/modality-rows.js";
 
 // The real transformers runner through the processor, registry and endpoints, over tiny offline fixtures built into a
 // temporary model root. The models are random: these tests prove the lifecycle, not semantic quality.
@@ -30,11 +30,11 @@ beforeAll(async () => {
 beforeEach(async () => { await pool.query("TRUNCATE ml_blobs,ml_dataset_schemas,ml_datasets,ml_feature_pipelines,ml_experiments,ml_registry_entries,runs,agents CASCADE"); });
 afterAll(async () => { await pool.end(); if (modelRoot) await rm(modelRoot, { recursive: true, force: true }); });
 
-async function fixture(modality: "text" | "image") {
+async function fixture(modality: "text" | "image" | "audio", speech = false) {
   const map = new Map([["transformers", new TransformersBackend(hfPython!, modelRoot)]]);
   const training = new MlTrainingService(pool, store), models = new MlModelService(pool, store, map);
-  const rows = modality === "text" ? TEXT_ROWS : IMAGE_ROWS;
-  const dataset = await training.ingest(manager, { name: modality, schema: { id: randomUUID(), columns: [{ name: "x", type: modality }, { name: "label", type: "string" }], target: "label" }, rows });
+  const rows = speech ? SPEECH_ROWS : modality === "text" ? TEXT_ROWS : modality === "image" ? IMAGE_ROWS : AUDIO_ROWS;
+  const dataset = await training.ingest(manager, { name: modality, schema: { id: randomUUID(), columns: [{ name: "x", type: modality }, { name: "label", type: speech ? "text" : "string" }], target: "label" }, rows });
   const pipeline = await training.pipeline(manager, { name: modality, definition: { features: ["x"], steps: [] } });
   const experiment = await training.experiment(manager, `transformers-${modality}`);
   const worker = new LifecycleWorker(pool, { workerId: "hf-test", leaseSeconds: 120, kind: "ml" }, new TrainingProcessor(pool, store, map));
@@ -90,5 +90,24 @@ describe.runIf(Boolean(hfPython))("real transformers backend through the durable
     expect(prediction.status).toBe("COMPLETED"); expect(prediction.output.every((label: string) => label === "red" || label === "blue")).toBe(true);
     const mismatch = await f.train("image_classifier", { model: "tiny-vit-encoder" }, ["accuracy"]); // an encoder offered as a classifier
     expect(mismatch.job.status).toBe("FAILED"); expect(JSON.stringify(mismatch.attempts[0].failure)).not.toContain(modelRoot.slice(3));
+  }, 600_000);
+
+  it("serves a pretrained speech recogniser: train records WER and CER, the endpoint returns transcripts", async () => {
+    const f = await fixture("audio", true);
+    const result = await f.train("speech_recognizer", { model: "tiny-wav2vec2-ctc" }, ["wer", "cer"]);
+    expect(result.job.status).toBe("COMPLETED");
+    expect(new Set(result.metrics.map((m: { name: string }) => m.name))).toEqual(new Set(["wer", "cer"]));
+    const { endpoint } = await f.serve(result.attempts[0].id, "speech");
+    const prediction = await f.models.predict(manager, endpoint.id, [{ x: wav(310) }, { x: wav(620) }], new AbortController().signal);
+    expect(prediction.status).toBe("COMPLETED"); expect(prediction.output).toEqual(["h", "h"]); // the fixture's forced transcript
+  }, 600_000);
+
+  it("binds a pretrained audio classifier's labels and serves them", async () => {
+    const f = await fixture("audio");
+    const result = await f.train("audio_classifier", { model: "tiny-wav2vec2-tones" }, ["accuracy"]);
+    expect(result.job.status).toBe("COMPLETED");
+    const { endpoint } = await f.serve(result.attempts[0].id, "tones");
+    const prediction = await f.models.predict(manager, endpoint.id, [{ x: wav(250) }, { x: wav(2600) }], new AbortController().signal);
+    expect(prediction.output.every((label: string) => label === "low" || label === "high")).toBe(true);
   }, 600_000);
 });

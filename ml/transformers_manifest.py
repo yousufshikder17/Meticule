@@ -24,7 +24,9 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # Exactly the files the supported families need: weights in safetensors, configs, tokenizers and processors. No code, no
 # pickled weights (.bin, .pt, .pth, .pkl, .ckpt, .h5, .msgpack), no shard indexes.
 ALLOWED_FILES = frozenset({"config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "vocab.txt", "vocab.json",
-                           "merges.txt", "special_tokens_map.json", "added_tokens.json", "preprocessor_config.json"})
+                           "merges.txt", "special_tokens_map.json", "added_tokens.json", "preprocessor_config.json",
+                           # transformers v5 saves a Wav2Vec2Processor (feature extractor + CTC tokenizer) as processor_config.json.
+                           "processor_config.json"})
 KINDS = frozenset({"text-encoder", "text-classifier", "image-encoder", "image-classifier", "audio-classifier", "speech-ctc"})
 MAX_FILES = 64
 MAX_TOTAL_BYTES = 2 * 1024 ** 3

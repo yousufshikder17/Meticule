@@ -34,8 +34,8 @@ def value_error(fn, *args):
     return False
 
 
-# ---- registry: the spec's table (sec. 7 without transcription), and Phase 3 tables kept exactly -----------------------
-C, R, F, A, E = "classification", "regression", "forecasting", "anomaly_detection", "embedding"
+# ---- registry: the spec's table (sec. 7), and Phase 3 tables kept exactly -----------------------------------------------
+C, R, F, A, E, T = "classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription"
 SPEC = {"accuracy": ({C}, "higher", True, False), "precision": ({C}, "higher", True, False), "recall": ({C}, "higher", True, False),
         "f1": ({C}, "higher", True, False), "roc_auc": ({C, A}, "higher", True, False), "log_loss": ({C}, "lower", True, False),
         "mae": ({R, F}, "lower", True, False), "mse": ({R}, "lower", True, False), "rmse": ({R, F}, "lower", True, False),
@@ -43,7 +43,8 @@ SPEC = {"accuracy": ({C}, "higher", True, False), "precision": ({C}, "higher", T
         "average_precision": ({A}, "higher", True, False), "anomaly_precision": ({A}, "higher", True, False),
         "anomaly_recall": ({A}, "higher", True, False), "anomaly_f1": ({A}, "higher", True, False),
         "threshold_calibration_error": ({A}, "lower", False, True), "retrieval_precision_at_1": ({E}, "higher", True, False),
-        "retrieval_mrr": ({E}, "higher", True, False), "mean_pairwise_cosine": ({E}, "lower", False, True)}
+        "retrieval_mrr": ({E}, "higher", True, False), "mean_pairwise_cosine": ({E}, "lower", False, True),
+        "wer": ({T}, "lower", True, False), "cer": ({T}, "lower", True, False)}
 results["registry_matches_phase4_spec"] = {n: (set(m[0]), m[1], m[2], m[3]) for n, m in common.METRICS.items()} == SPEC
 PHASE3 = {"accuracy": "higher", "precision": "higher", "recall": "higher", "f1": "higher", "roc_auc": "higher",
           "log_loss": "lower", "mae": "lower", "mse": "lower", "rmse": "lower", "r2": "higher"}
@@ -51,11 +52,12 @@ results["phase3_tables_unchanged"] = (common.TASK_METRICS[C] == ("accuracy", "pr
                                       and common.TASK_METRICS[R] == ("mae", "mse", "rmse", "r2")
                                       and list(sklearn_runner.DIRECTIONS.items()) == list(PHASE3.items())
                                       and list(common.DIRECTIONS.items())[:10] == list(PHASE3.items()))
-results["derived_tables_consistent"] = (set(common.DIRECTIONS) == set(SPEC) and set(common.TASK_METRICS) == {C, R, F, A, E}
+results["derived_tables_consistent"] = (set(common.DIRECTIONS) == set(SPEC) and set(common.TASK_METRICS) == {C, R, F, A, E, T}
                                         and all(n in common.TASK_METRICS[t] for n, m in SPEC.items() for t in m[0])
                                         and common.LABEL_FREE == common.DIAGNOSTIC == {"threshold_calibration_error", "mean_pairwise_cosine"})
 DEFAULTS = {C: (["accuracy"], None), R: (["mae", "mse"], None), F: (["mae", "rmse"], None),
-            A: (["average_precision"], ["threshold_calibration_error"]), E: (["retrieval_precision_at_1"], ["mean_pairwise_cosine"])}
+            A: (["average_precision"], ["threshold_calibration_error"]), E: (["retrieval_precision_at_1"], ["mean_pairwise_cosine"]),
+            T: (["wer", "cer"], None)}
 results["default_metrics_per_task"] = all(
     common.default_metrics(t, True) == labelled and (value_error(common.default_metrics, t, False) if unlabelled is None else common.default_metrics(t, False) == unlabelled)
     for t, (labelled, unlabelled) in DEFAULTS.items())
@@ -142,6 +144,25 @@ naive = np.mean([units[i] @ units[j] for i in range(31) for j in range(31) if i 
 results["mean_pairwise_cosine_matches_all_pairs"] = close(common.mean_pairwise_cosine(pairs), float(naive))
 results["mean_pairwise_cosine_refuses_undefined"] = refuses(common.mean_pairwise_cosine, [[1, 2]]) and refuses(common.mean_pairwise_cosine, [[1, 2], [0, 0]]) \
     and refuses(common.mean_pairwise_cosine, [])
+
+# WER/CER: corpus rates on normalised text. For hypotheses "h": words 0/1 + 1/1 + 2/2 = 3/4; characters 0/1 + 1/2 + 3/3 = 4/6.
+def naive_levenshtein(a, b):
+    row = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        previous, row[0] = row[0], i
+        for j, y in enumerate(b, 1):
+            previous, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, previous + (x != y))
+    return row[-1]
+
+
+rng = np.random.default_rng(4)
+pairs_ = [("".join(rng.choice(list("abc "), size=rng.integers(0, 12))), "".join(rng.choice(list("abcd"), size=rng.integers(0, 12)))) for _ in range(300)]
+results["levenshtein_matches_dynamic_programming"] = all(common.levenshtein(a, b) == naive_levenshtein(a, b) for a, b in pairs_) \
+    and common.levenshtein("kitten", "sitting") == 3 and common.levenshtein(["a", "b"], []) == 2
+results["wer_cer_hand_computed"] = (common.wer(["h", "hi", "a b"], ["h"] * 3) == 0.75 and close(common.cer(["h", "hi", "a b"], ["h"] * 3), 4 / 6)
+                                    and common.wer(["Hello   World"], ["hello world"]) == 0.0 and common.wer(["a b"], [""]) == 1.0
+                                    and common.cer(["ab"], ["abcd"]) == 1.0 and type(common.wer(["a"], ["a"])) is float)
+results["wer_cer_refuse_empty_references"] = refuses(common.wer, ["", "  "], ["h", "h"]) and refuses(common.cer, [], [])
 
 registry = {"directions": common.DIRECTIONS,
             "taskMetrics": {task: sorted(names) for task, names in common.TASK_METRICS.items()},

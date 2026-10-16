@@ -45,7 +45,8 @@ describe.runIf(Boolean(python))("Python runtime common", () => {
       "mase_refuses_zero_or_missing_scale", "average_precision_hand_computed", "anomaly_roc_auc_hand_computed", "anomaly_scores_hand_computed",
       "anomaly_zero_division_is_zero", "binary_metrics_refuse_single_class", "threshold_calibration_error_hand_computed", "retrieval_hand_computed",
       "retrieval_is_scale_invariant", "retrieval_excludes_rows_without_a_peer", "retrieval_ties_rank_non_relevant_first", "retrieval_blockwise_equals_single_block",
-      "retrieval_refuses_undefined", "mean_pairwise_cosine_hand_computed", "mean_pairwise_cosine_matches_all_pairs", "mean_pairwise_cosine_refuses_undefined"]);
+      "retrieval_refuses_undefined", "mean_pairwise_cosine_hand_computed", "mean_pairwise_cosine_matches_all_pairs", "mean_pairwise_cosine_refuses_undefined",
+      "levenshtein_matches_dynamic_programming", "wer_cer_hand_computed", "wer_cer_refuse_empty_references"]);
     // The mirror must equal the TypeScript registry: names, directions, task membership, label need, diagnostics, defaults.
     const names = Object.keys(METRICS) as MetricName[];
     const unlabelled = (task: (typeof TASK_TYPES)[number]) => { try { return defaultMetrics(task, false); } catch { return null; } };

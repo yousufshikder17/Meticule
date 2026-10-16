@@ -209,6 +209,6 @@ jobs:
           echo "ML_TEST_TRANSFORMERS_PYTHON=$RUNNER_TEMP/hf-venv/bin/python" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm run db:migrate
-      - run: npx vitest run tests/unit/ml-transformers.test.ts tests/unit/ml-transformers-runner.test.ts tests/integration/ml-transformers.test.ts tests/conformance/transformers-text-classifier.test.ts tests/conformance/transformers-text-embedder.test.ts tests/conformance/transformers-text-embedding-classifier.test.ts tests/conformance/transformers-image-classifier.test.ts tests/conformance/transformers-image-embedder.test.ts tests/conformance/transformers-image-embedding-classifier.test.ts
+      - run: npx vitest run tests/unit/ml-transformers.test.ts tests/unit/ml-transformers-runner.test.ts tests/integration/ml-transformers.test.ts tests/conformance/transformers-text-classifier.test.ts tests/conformance/transformers-text-embedder.test.ts tests/conformance/transformers-text-embedding-classifier.test.ts tests/conformance/transformers-image-classifier.test.ts tests/conformance/transformers-image-embedder.test.ts tests/conformance/transformers-image-embedding-classifier.test.ts tests/conformance/transformers-audio-classifier.test.ts tests/conformance/transformers-speech-recognizer.test.ts
         env:
           CI: "true"
