@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { ML_BACKEND_CONTRACT, MlBackendFailure, categoryForRunnerCode, type MlFailureCategory } from "./contract.js";
+import { ML_BACKEND_CONTRACT, MlBackendFailure, categoryForRunnerCode, type MlBackendContract, type MlFailureCategory } from "./contract.js";
 
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 // A runner exit that carries no fixed code is classified by the operation that failed, never by a framework message.
@@ -14,16 +14,18 @@ export interface RunnerCall {
   /** Protocol command plus its JSON payload, written to the runner's stdin as one object. */
   request: Record<string, unknown>;
   signal: AbortSignal;
+  /** Contract the request speaks; v1 unless the caller selects one (RunnerBackend uses contractFor). */
+  contract?: MlBackendContract;
 }
 
 /**
  * Runs one bounded computation in a fresh Python process and returns its JSON response.
  * The child is killed on timeout or abort (lease loss, cancellation); it never outlives the call.
- * Every request carries the contract version, and every response must echo it back.
+ * Every request carries the contract version, and every response must echo exactly that version (A2).
  */
-export function callRunner({ label, python, script, timeoutMs, request, signal }: RunnerCall): Promise<unknown> {
+export function callRunner({ label, python, script, timeoutMs, request, signal, contract = ML_BACKEND_CONTRACT }: RunnerCall): Promise<unknown> {
   return new Promise((resolveCall, reject) => {
-    const envelope = { ...request, contract: ML_BACKEND_CONTRACT };
+    const envelope = { ...request, contract };
     const command = String(request.command);
     let timedOut = false; let oversize = false;
     const child = spawn(python, [script], { windowsHide: true, shell: false, signal, env: runnerEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
@@ -48,7 +50,7 @@ export function callRunner({ label, python, script, timeoutMs, request, signal }
       }
       let response: unknown;
       try { response = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { reject(new MlBackendFailure("invalid_response", "Invalid runner response")); return; }
-      if (!response || typeof response !== "object" || (response as { contract?: unknown }).contract !== ML_BACKEND_CONTRACT) {
+      if (!response || typeof response !== "object" || (response as { contract?: unknown }).contract !== contract) {
         reject(new MlBackendFailure("runtime_incompatible", `${label} runner speaks a different ML backend contract`)); return;
       }
       resolveCall(response);
@@ -65,7 +67,9 @@ export function callRunner({ label, python, script, timeoutMs, request, signal }
  */
 const INHERITED = ["PATH", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL", "CUDA_PATH", "CUDA_VISIBLE_DEVICES"];
 function runnerEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { OMP_NUM_THREADS: "1", OPENBLAS_NUM_THREADS: "1", MKL_NUM_THREADS: "1", PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" };
+  // Hugging Face libraries are pinned offline with no telemetry; no token or cache path is ever inherited.
+  const env: NodeJS.ProcessEnv = { OMP_NUM_THREADS: "1", OPENBLAS_NUM_THREADS: "1", MKL_NUM_THREADS: "1", PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8",
+    HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_DATASETS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1", TOKENIZERS_PARALLELISM: "false" };
   for (const name of INHERITED) if (process.env[name] !== undefined) env[name] = process.env[name];
   return env;
 }

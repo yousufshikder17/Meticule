@@ -6,6 +6,9 @@ import { validateRows, type ArtifactReference, type Row, type Snapshot } from ".
 import { MlExperimentService } from "./experiments.js";
 import { MlTrainingService } from "./persistence.js";
 import { EarlyStopper, effectivePolicy, isIterative, requestedEpochs } from "./training-policy.js";
+import { getModel } from "./model-catalog.js";
+import { TASKS, embeddingDimension } from "./tasks.js";
+import { timestampMs } from "./media.js";
 
 /**
  * Only failures Meticule classified carry their own text. Any other error (filesystem, database driver, parser) is
@@ -20,6 +23,17 @@ function assertFolds(train: number[], folds: number[][] | undefined, expected: b
   if (!expected) { if (folds) throw new MlBackendFailure("invalid_response", "Backend returned unexpected CV folds"); return; }
   const flat = (folds ?? []).flat(); const allowed = new Set(train);
   if (!folds || folds.length !== count || folds.some(f => !f.length) || flat.length !== allowed.size || new Set(flat).size !== flat.length || flat.some(i => !allowed.has(i))) throw new MlBackendFailure("invalid_response", "Backend returned invalid CV folds");
+}
+
+/**
+ * A chronological split puts every training instant at or before every validation instant, and those at or before every
+ * test instant (ties allowed). A missing or unparsable time is NaN, which fails both comparisons.
+ */
+function assertChronological(rows: Row[], column: string, prepared: PreparedData): void {
+  const times = (indices: number[]) => indices.map(i => timestampMs(String(rows[i]![column])) ?? NaN);
+  const latest = (t: number[]) => t.reduce((a, b) => Math.max(a, b), -Infinity), earliest = (t: number[]) => t.reduce((a, b) => Math.min(a, b), Infinity);
+  const [train, validation, test] = [prepared.indices.train, prepared.indices.validation, prepared.indices.test].map(times) as [number[], number[], number[]];
+  if (!(latest(train) <= earliest(validation) && latest(validation) <= earliest(test))) throw new MlBackendFailure("invalid_response", "Backend returned a non-chronological split");
 }
 
 /** A resumed attempt must see exactly the split its checkpoint was trained on. Any difference fails explicitly. */
@@ -44,12 +58,16 @@ export class TrainingProcessor {
     try {
       const attempt = await service.begin(runId, workerId); attemptId = attempt.id; const snapshot = attempt.snapshot;
       const backend = this.backends.get(snapshot.backend); if (!backend) throw new MlBackendFailure("backend_unavailable", "Training backend is not configured"); backend.validate(snapshot);
+      // The task comes from the catalog only (B1), and its CV rule holds whichever backend runs the attempt.
+      const task = getModel(snapshot.backend, snapshot.algorithm).taskType;
+      if (snapshot.evaluation.cv && (!TASKS[task].crossValidation || snapshot.split.strategy !== "random")) throw new ConflictError("Cross-validation is not supported for this task and split");
       const data = await this.artifacts.get(attempt.tenantId, snapshot.dataset.content);
       const rows = validateRows(snapshot.dataset.schema, JSON.parse(data.toString("utf8")));
       if (rows.length !== snapshot.dataset.rowCount) throw new MlBackendFailure("training_failed", "Dataset row count mismatch");
       const prepared = await backend.prepare(snapshot, rows, controller.signal);
       const partitions = Object.values(prepared.indices); const all = partitions.flat();
       if (partitions.some(p => !p.length) || all.length !== rows.length || new Set(all).size !== rows.length || all.some(i => !Number.isInteger(i) || i < 0 || i >= rows.length)) throw new MlBackendFailure("invalid_response", "Backend returned invalid split indices");
+      if (snapshot.split.strategy === "chronological") assertChronological(rows, snapshot.split.timeColumn, prepared);
       assertFolds(prepared.indices.train, prepared.folds, Boolean(snapshot.evaluation.cv), snapshot.evaluation.cv?.folds);
       assertSameSplit(attempt.previousSplit, prepared);
       await service.phase(runId, workerId, attempt.id, "TRAINING", prepared);
@@ -58,11 +76,11 @@ export class TrainingProcessor {
       if (backend.capabilities.iterative && isIterative(snapshot)) {
         const trained = await this.trainIteratively(service, runId, workerId, attempt, backend, snapshot, rows, prepared, controller.signal);
         model = trained.model; outcome = trained.outcome;
-        await service.phase(runId, workerId, attempt.id, "EVALUATING", undefined, model);
       } else {
         model = await backend.train(snapshot, rows, prepared, controller.signal);
-        await service.phase(runId, workerId, attempt.id, "EVALUATING", undefined, model);
       }
+      if (task === "embedding") embeddingDimension(model.environment); // E1: prediction checks vectors against it, so it must be valid
+      await service.phase(runId, workerId, attempt.id, "EVALUATING", undefined, model);
       const { metrics, performance } = backend.evaluateDetailed ? await backend.evaluateDetailed(snapshot, rows, prepared, model, controller.signal) : { metrics: await backend.evaluate(snapshot, rows, prepared, model, controller.signal) };
       const required = snapshot.evaluation.cv ? ["train", "validation", "test", "cv", "cv_fold"] : ["train", "validation", "test"];
       if (!metrics.length || required.some(p => !metrics.some(m => m.partition === p)) || (!snapshot.evaluation.cv && metrics.some(m => m.partition.startsWith("cv")))) throw new MlBackendFailure("invalid_response", "Backend omitted evaluation partitions");

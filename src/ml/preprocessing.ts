@@ -20,7 +20,8 @@ const ENCODERS = ["one_hot_encode", "ordinal_encode"];
 
 export function validatePipeline(snapshot: Snapshot): void {
   const types = new Map(snapshot.dataset.schema.columns.map(c => [c.name, c.type]));
-  const categorical = snapshot.pipeline.definition.features.filter(f => types.get(f) !== "number");
+  // Only string and boolean features are categorical: text is free-form, and the other Phase 4 types are not encoded here.
+  const categorical = snapshot.pipeline.definition.features.filter(f => types.get(f) === "string" || types.get(f) === "boolean");
   const steps = snapshot.pipeline.definition.steps;
   const seen = new Set<string>();
   for (const step of steps) {

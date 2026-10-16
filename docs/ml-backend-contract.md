@@ -1,9 +1,10 @@
-# Meticule ML Backend Contract v1
+# Meticule ML Backend Contract
 
 This is the internal contract between the Meticule ML platform and the execution backends behind it (scikit-learn, PyTorch
-and TensorFlow today). It is version `meticule-ml-backend/v1`. It is **internal**: there is no public plugin SDK, no dynamic
-loading of third-party code, and nothing here is promised to external authors. The contract exists so that adding an internal
-backend is a narrow, testable change, and so that a future v2 can coexist with v1 instead of being misread.
+and TensorFlow today). It has two versions: `meticule-ml-backend/v1`, and `meticule-ml-backend/v2`, which is v1 plus the
+Phase 4 modality vocabulary (section 19). It is **internal**: there is no public plugin SDK, no dynamic loading of third-party
+code, and nothing here is promised to external authors. The contract exists so that adding an internal backend is a narrow,
+testable change, and so that v1 and v2 coexist instead of being misread.
 
 Read this with [ml.md](ml.md) (lifecycle, HTTP surface, experiments, the optional frameworks and operation). This
 document owns the contract; ml.md links here rather than restating it.
@@ -26,18 +27,25 @@ request, computes, and returns a bounded response. The TypeScript side (`src/ml/
 
 ## 2. Version
 
-The version is a string constant, `ML_BACKEND_CONTRACT` in `src/ml/contract.ts`, mirrored as `ML_BACKEND_CONTRACT` in
-`ml/ml_runtime_common.py`. It is checked in four places:
+There are two versions, string constants in `src/ml/contract.ts`: `ML_BACKEND_CONTRACT` (`meticule-ml-backend/v1`) and
+`ML_BACKEND_CONTRACT_V2` (`meticule-ml-backend/v2`), listed together as `ML_BACKEND_CONTRACTS`. `ml/ml_runtime_common.py`
+mirrors them as `ML_BACKEND_CONTRACT`, `ML_BACKEND_CONTRACT_V2` and `SUPPORTED_CONTRACTS`. Each request speaks exactly one
+version, chosen per request by `contractFor` (section 19.1); a Phase 1-3 snapshot always speaks v1. The version is checked in
+four places:
 
-- every runner request carries `contract` and a runner refuses any other value (`unsupported_contract`) before doing work;
-- every successful runner response echoes `contract`, and the TypeScript client refuses a response that does not carry it
-  (`runtime_incompatible`);
-- `tests/unit/ml-contract.test.ts` fails if the two sides declare different versions or emit different refusal codes;
-- the conformance suite sends a request from another contract and asserts the refusal.
+- every runner request carries `contract`. A runner refuses a version it does not support (`unsupported_contract`), and a
+  request its version does not cover (section 19.2), before doing work. A runner served without a task lookup (the frozen
+  Phase 1 adapter in the tests) supports v1 only;
+- every successful runner response echoes the request's `contract`, and the TypeScript client refuses a response that does
+  not carry exactly the version it sent (`runtime_incompatible`);
+- `tests/unit/ml-contract.test.ts` reads every `ml/*.py` file and fails if the two sides declare different versions or
+  emit different refusal codes;
+- the conformance suite sends raw requests: another contract is refused, both current contracts are accepted, and a request
+  its contract does not cover is refused (section 11).
 
-A change that alters the meaning of a field, the command set, the failure taxonomy or artifact semantics is a new version. A
-v2 would be introduced by adding a constant and teaching the client to accept both; nothing in v1 is written to make that
-impossible.
+A change that alters the meaning of a field, the command set, the failure taxonomy or artifact semantics is a new version. v2
+was introduced that way: a second constant, a client that selects one version per request, and runners that accept both.
+A v1 request keeps its exact Phase 1-3 meaning.
 
 ## 3. Operations
 
@@ -50,7 +58,7 @@ backends extend it again through `NeuralRunnerBackend` and add the iterative pai
 | `prepare(snapshot, rows, signal)` | Yes | Snapshot and dataset rows | Disjoint train, validation and test indices; optional CV folds; environment | Aborting kills the runner | Runner categories |
 | `train(snapshot, rows, prepared, signal)` | Yes | As above, plus the prepared split | Artifact bytes, format, environment, resolved hyperparameters, measured timings | Aborting kills the runner | `training_failed` and others |
 | `evaluate` / `evaluateDetailed` | Yes (`evaluate`); `evaluateDetailed` refines it | Snapshot, rows, prepared split, trained model | Metrics for every partition the snapshot asks for | Aborting kills the runner | `evaluation_failed` |
-| `predict(snapshot, artifact, rows, environment, signal)` | Yes | Stored artifact bytes and their recorded environment | One JSON prediction per row | Aborting kills the runner | `prediction_failed` and `incompatible_artifact` |
+| `predict(snapshot, artifact, rows, environment, signal)` | Yes | Stored artifact bytes and their recorded environment | One JSON prediction per row, or `horizon` predictions for forecasting, in the task's output shape (section 19.8) | Aborting kills the runner | `prediction_failed` and `incompatible_artifact` |
 | `trainChunk(snapshot, rows, prepared, state, epochs, signal)` | Capability-gated: `iterative` | The previous checkpoint, or none, and a bounded number of epochs | A new checkpoint, the epoch summaries it ran, and the total completed | As above | `invalid_checkpoint`, `incompatible_checkpoint` |
 | `exportModel(snapshot, checkpoint, restoreBest, signal)` | Capability-gated: `iterative` | A checkpoint | An inference artifact built from the last or best-epoch weights | As above | `invalid_checkpoint` |
 
@@ -78,8 +86,10 @@ These meanings belong to Meticule. A backend may not reinterpret them.
   validation indices. A mismatch is an explicit `incompatible_checkpoint`, never a silent restart.
 - **An artifact** is the deployable product of a completed attempt: format, bytes, and environment. It is stored by content hash
   and its format is recorded before inference.
-- **Evaluation** computes the metrics the snapshot asks for, on the partitions it names, with directions declared once in
-  `ml/ml_runtime_common.py` and mirrored in `src/ml/metrics.ts`. Ranking reads the direction, never the metric name.
+- **Evaluation** computes the metrics the snapshot asks for, on the partitions it names. The metric registry (tasks,
+  direction, whether a metric needs labels, whether it is a diagnostic) is declared in `src/ml/metrics.ts` and mirrored in
+  `ml/ml_runtime_common.py`; a unit test compares the two (section 19.7). Ranking reads the direction, never the metric
+  name.
 - **Prediction** is a pure function of the stored artifact and the submitted rows. It refuses an artifact it cannot read before
   it reads any bytes beyond the recorded environment.
 - **Environment and provenance** are recorded for every attempt (section 9).
@@ -103,9 +113,13 @@ A backend declares what its runner can execute. The declaration is `BackendCapab
 | `precisions` | `fp32`, and `mixed` only where CUDA training is real. |
 | `preprocessing` | Operations the runner interprets. Any other step is refused before a runner starts. |
 | `iterative` | Whether the backend trains in bounded, checkpointable chunks. |
+| `tasks` | Tasks the runner implements, from `TASK_TYPES` (`src/ml/tasks.ts`). |
+| `inputs` | Column types the runner reads as features, from `COLUMN_TYPES` (`src/ml/domain.ts`). |
 
 Models carry their own capabilities in the catalog (`ModelCapabilities`): scores, scale sensitivity, seeding, `iterative`,
-and optionally a narrower `devices` list and `mixedPrecision`. The rules, enforced by `RunnerBackend.validate` and the
+and optionally a narrower `devices` list and `mixedPrecision`. A model definition also declares `inputs` (the feature column
+types it reads and a minimum and maximum feature count; default 1 to 199 number, string or boolean columns) and `learning`
+(`supervised`, `unsupervised` or `pretrained`; default `supervised`). The rules, enforced by `RunnerBackend.validate` and the
 conformance suite:
 
 - a model without its own device list inherits the backend's;
@@ -113,15 +127,19 @@ conformance suite:
 - a model that is iterative requires an iterative backend;
 - a model that supports mixed precision requires the backend to declare `mixed`;
 - a training policy (checkpoints, early stopping) is refused on a non-iterative backend;
-- early stopping needs a validation partition and an iterative model.
+- early stopping needs a validation partition and an iterative model;
+- under v2, the backend must declare the model's task, and every feature column type must be one both the model and the
+  backend read (section 19.4);
+- the backend's `tasks` and `inputs` are exactly the tasks and input types its registered models use (conformance suite).
 
 The device and precision vocabulary is declared once, in `src/ml/domain.ts` (`DEVICES`, `PRECISIONS`), and the TypeScript types
-are derived from it.
+are derived from it. The task vocabulary is declared once in `src/ml/tasks.ts`, the column types in `src/ml/domain.ts`.
 
-Future capabilities (text, vision, audio, time series, embeddings, generative models, fine-tuning, PEFT, distributed or remote
-training, ONNX-style inference) are **not implemented**. They would be new optional fields on `BackendCapabilities` or on the
-model definition, and the suite would learn to check them. Nothing in v1 needs to change for them to be added, except where
-section 14 names a blocking assumption.
+Phase 4 added the vocabulary for text, timestamp, image and audio columns and for the forecasting, anomaly-detection and
+embedding tasks (section 19), but **no backend implements them yet**: all three declare classification and regression over
+number, string and boolean feature columns. Generative models, fine-tuning, PEFT, distributed or remote training and ONNX-style
+inference are **not implemented**. They would be new optional fields on `BackendCapabilities` or on the model definition, and
+the suite would learn to check them, except where section 14 names a blocking assumption.
 
 ## 6. Failure taxonomy
 
@@ -129,8 +147,8 @@ Backend and runner failures are classified into a bounded set of categories (`ML
 
 | Category | Meaning |
 | --- | --- |
-| `invalid_request` | A snapshot or request was refused by validation (`ConflictError`). |
-| `unsupported_capability` | The backend does not declare the device, precision, operation or training mode requested. |
+| `invalid_request` | A snapshot or request was refused by validation (`ConflictError`), or a runner refused the data (`undefined_metric`, `invalid_time_series`, `invalid_media`). |
+| `unsupported_capability` | The backend does not declare the device, precision, operation, training mode or task requested. |
 | `incompatible_artifact` | An artifact this runtime must not load. |
 | `incompatible_checkpoint` | A checkpoint from another configuration, backend, format or runtime. |
 | `invalid_checkpoint` | A checkpoint that is unreadable, malformed or corrupt. |
@@ -144,8 +162,9 @@ Backend and runner failures are classified into a bounded set of categories (`ML
 | `timed_out` | The runner exceeded its time budget and was killed. |
 
 The runner refusal codes are a closed set: `unsupported_contract`, `incompatible_artifact`, `incompatible_checkpoint`,
-`invalid_checkpoint`, `cuda_unavailable`, `cuda_unsupported`, `mixed_requires_cuda` and `unsupported_device_or_precision`. A runner
-prints one of them on stderr as its last line, as JSON. The client reads only those codes; any other text is discarded. A runner
+`invalid_checkpoint`, `cuda_unavailable`, `cuda_unsupported`, `mixed_requires_cuda` and `unsupported_device_or_precision`, plus
+the four Phase 4 codes `unsupported_task`, `undefined_metric`, `invalid_time_series` and `invalid_media` (section 19.6). A
+runner prints one of them on stderr as its last line, as JSON. The client reads only those codes; any other text is discarded. A runner
 exit with no fixed code is classified by the operation that failed.
 
 What is stored: a failed training attempt records `{ code: "ml_training_failed", category, message }` and a failed prediction
@@ -161,16 +180,26 @@ message, because zod issue text can echo the output it rejected.
 Each runner is a fresh Python process per call. It is started with `shell: false`, reads one JSON object from stdin and writes one
 JSON object to stdout.
 
-Request envelope: `{ "command", "contract", "snapshot", "rows", ...command fields }`. Commands are `prepare`, `train`,
-`train_chunk`, `export`, `evaluate` and `predict`. The sklearn runner also answers `catalog`.
+Request envelope: `{ "command", "contract", "snapshot", "rows", ...command fields }`. A v2 request also carries `task`, the
+algorithm's catalog task, which the runner checks against its own (section 19.2). Commands are `prepare`, `train`,
+`train_chunk`, `export`, `evaluate` and `predict`. The sklearn runner also answers `catalog`. A backend may add its own request
+fields through `RunnerBackend.requestExtras()` (none does yet); the protocol fields always win over them.
 
-Response: the command's JSON with `contract` set to the version. Stdout is capped at 64 MiB; a larger response kills the runner.
+Response: the command's JSON with `contract` set to the request's contract. Stdout is capped at 64 MiB; a larger response kills
+the runner. Nothing a command prints can corrupt the response: while it runs, Python-level output goes to stderr, and file
+descriptor 1 is pointed at stderr for the rest of the process (native libraries write to it directly), while the response is
+written once to a duplicate of the original stdout. Buffered Python and C-runtime output is flushed before the final line, so a
+refusal stays the last stderr line. A library linked to its own private C runtime cannot be flushed this way; its output
+still goes to stderr, but could land after the refusal line.
 
 Timeouts (`ML_TIMEOUT_MS`, default 120 s) and cancellation kill the child. A child never outlives its call.
 
 Environment: runners start from an allowlist (`src/ml/runner-process.ts`). They receive `PATH` and the system variables the
-interpreter and native libraries need, plus the thread limits and `PYTHONDONTWRITEBYTECODE`. They never receive the database URL,
-the JWT secret, provider keys, `PYTHONPATH` or `PYTHONHOME`. A unit test plants a secret and asserts the child cannot see it.
+interpreter and native libraries need, plus the thread limits, `PYTHONDONTWRITEBYTECODE`, `PYTHONIOENCODING`, and the Hugging
+Face offline settings (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`, `HF_DATASETS_OFFLINE`, `HF_HUB_DISABLE_TELEMETRY`,
+`TOKENIZERS_PARALLELISM=false`). They never receive the database URL, the JWT secret, provider keys, a Hugging Face token or
+cache path, `PYTHONPATH` or `PYTHONHOME`. A unit test plants a secret and asserts the child cannot see it; another asserts the
+offline settings and the absence of the token and cache variables.
 
 Stdin and stdout are the only channels. A runner never reads a file it was not handed, never opens a socket, and never receives a
 database handle.
@@ -265,7 +294,8 @@ state.
 `tests/conformance/contract-suite.ts` is one suite, written against platform semantics, and each internal backend runs it through
 a thin file. It checks, where the backend's declared capabilities say a check applies:
 
-- identity and declared capabilities; truthfulness about iteration and models;
+- identity and declared capabilities; truthfulness about iteration and models; `tasks` and `inputs` equal to the tasks and
+  input types the backend's registered models use;
 - validation refusals before any runner starts: an unknown algorithm, a model from another backend, an uninterpreted operation,
   an undeclared device, an undeclared mixed precision, a policy on a non-iterative backend;
 - preparation (disjoint, complete partitions), training, evaluation, prediction, determinism for the same seed and split, and a
@@ -274,6 +304,9 @@ a thin file. It checks, where the backend's declared capabilities say a check ap
   load;
 - cancellation before a call starts; a runner killed at its time budget and reported as `timed_out`; a request from another
   contract refused, and the current contract accepted;
+- raw envelopes sent straight to the runner: a v1 `prepare` or `predict` carrying Phase 4 vocabulary refused as
+  `unsupported_contract`; a v2 request naming another task or an unknown algorithm refused as `unsupported_task`; a matching
+  v2 request accepted with v2 echoed;
 - for iterative backends: a checkpoint per chunk and resume to the next epochs; chunked training equal to uninterrupted training;
   corrupt and foreign checkpoints refused with the right category;
 - for backends that declare CUDA: a real CUDA run with CUDA recorded as the actual device, or an explicit `device_unavailable`
@@ -302,6 +335,8 @@ Evidence that the suite can fail: with TensorFlow falsely declaring CUDA, the CU
 | Malformed runner output | Every response is parsed at one boundary and becomes `invalid_response` on mismatch. | Verified by the conformance suite |
 | Oversized responses | A response over 64 MiB kills the runner. Rows are capped at 50,000 by the domain schema. | Verified by code review |
 | Stderr leakage | Only fixed refusal codes are read. Other stderr is discarded. | Verified by the conformance suite |
+| Library output on the protocol channel | While a command runs, stdout is redirected to stderr at the Python and file-descriptor levels; the response goes once to a duplicate of the original stdout (section 7). | Verified by `tests/python/check_contract.py` |
+| Malicious media cells | Image and audio cells pass strict base64 and bounded header walks before anything decodes them, and each request's total pixels and audio seconds are capped (section 19.5). The validators never decode pixels. | Verified by the shared vector file in both languages |
 | Source-path and stack-trace leakage | Runner exceptions are reduced to a type name or a fixed code. Refusal messages are checked for paths and traces. | Verified by the conformance suite |
 | Secret and environment leakage | Runners start from an allowlist. | Verified by a planted-secret test that fails on the previous behaviour |
 | Artifact tampering | The store verifies size and SHA-256 before the runner sees bytes. | Store-level tests; not repeated at the runner |
@@ -330,6 +365,9 @@ change.
 | Devices | `cpu` | `cpu`, `cuda` | `cpu` |
 | Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` |
 | Iterative | no | yes | yes |
+| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` |
+| Contracts accepted | v1, v2 | v1, v2 | v1, v2 |
 | Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations |
 | Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` |
 | Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` |
@@ -356,7 +394,8 @@ Findings from a search of the ML subsystem for framework assumptions. Each is cl
 | Three copies of `requested_metrics` in the Python runners | C | Fixed: one helper in `ml_runtime_common` |
 | Preprocessing refusal message named "sklearn", in code the generic pipeline validator owns | C | Fixed: generic message |
 | Sklearn accepted any preprocessing operation and failed later inside Python | C | Fixed: declared `preprocessing` capability |
-| Preprocessing operation registry in `preprocessing.ts` is shaped around tabular scopes (numeric, categorical, global) | D | Documented. A text, image or time-series backend would need a different registry. This is the largest v2 candidate. |
+| Preprocessing operation registry in `preprocessing.ts` is shaped around tabular scopes (numeric, categorical, global) | D | Documented. Phase 4 keeps it tabular: only string and boolean features count as categorical (text does not), and under v2 preprocessing steps are refused for a model whose inputs are not all tabular. A text, image or time-series pipeline would need its own registry. |
+| Phase 4 rules declared in both languages: contract selection, the metric registry, media and timestamp rules, partition sizes | A, mirrored | Each pair is compared by a cross-language test (section 19.10) |
 | Iterative models locate the epoch count by the hyperparameter name `epochs` | D | Documented convention. An iterative model that counts differently would need the catalog to declare its epoch parameter. |
 | Neural model definitions and the Python runners mirror each other's limits (`MLP_LIMITS`, `LIMITS`) | C, remaining | Kept in sync by a comment in both files. A cross-language check like the one for the contract version would close it. Not done here. |
 | The two neural runners duplicate their evaluation and cross-validation loops (about 975 differing lines by `diff`, most of it framework code) | B for the framework code, D for the loops | Left alone. These loops compute with framework-specific predictions. Extract them when a third neural framework needs the same loops. |
@@ -370,8 +409,8 @@ What the v1 contract already accommodates, what a new optional capability would 
 
 | Category | Status under v1 |
 | --- | --- |
-| Embeddings, NLP text classification | Partly. A model with a text feature needs a text preprocessing vocabulary, which is a blocking registry assumption (section 14). A classifier head over embeddings works as a neural backend. |
-| Vision, audio, time series, anomaly detection | Blocking for the preprocessing registry. The runner protocol carries JSON rows and a single numeric matrix; image and audio inputs need a new input shape, which is a v2 change. |
+| Embeddings, NLP text classification | Vocabulary only. v2 defines `text` columns, the `embedding` task, its output and its metrics (section 19), but no backend declares them yet. Preprocessing steps stay tabular (section 14). A classifier head over embeddings works as a neural backend. |
+| Vision, audio, time series, anomaly detection | Vocabulary only. v2 carries images and audio as validated base64 cells and timestamps as ISO-8601 cells in the same JSON rows, plus the forecasting and anomaly-detection tasks, outputs and metrics (section 19). No backend implements them yet; only the chronological split already runs, for classification and regression. |
 | Hugging Face-style models, XGBoost, LightGBM | A one-shot backend is supported as sklearn is. An iterative one is supported as the neural backends are. Their weights need the artifact format to be opaque bytes, which it already is. |
 | Richer MLOps, deployment targets, ONNX | Inference artifacts are opaque bytes behind a declared format, so an ONNX format is an additional format and runner. The inference lifecycle is outside the backend contract. |
 | Lineage, monitoring, promotion and rollback, advanced HPO | Outside the backend contract by design. The registry and experiments already own them. |
@@ -379,8 +418,8 @@ What the v1 contract already accommodates, what a new optional capability would 
 | Distributed and remote training | Blocking for the runner boundary. A runner is one local process with no shared state; a remote or distributed backend needs an execution transport and a lease model for its workers. This is a v2 concern. |
 | Model routing, distillation, reinforcement learning | Outside the single-attempt model. Routing belongs to the inference layer; distillation and RL need multi-attempt state the platform does not yet model. |
 
-**What likely requires a contract v2:** a non-tabular input shape; a remote or distributed execution transport; a training loop that
-is not expressed as epochs over rows.
+**What required contract v2:** non-tabular inputs, which v2 carries as typed cells in the same JSON rows (section 19). **What would
+still need a new version:** a remote or distributed execution transport; a training loop that is not expressed as epochs over rows.
 
 ## 16. Adding JAX (thought experiment only)
 
@@ -419,5 +458,262 @@ Conclusion: the architecture is healthy for this case.
 The contract is ready for internal use: every operation is classified, every capability is checked against the same declarations the
 platform uses, and the three backends pass one suite. It is not ready to be promised as an external SDK. The taxonomy and the
 checkpoint format have been exercised by three backends, not by a stranger's backend; the runner protocol has no compatibility
-policy beyond "the contract constant must match"; and the sklearn pickle boundary is a residual risk that an external author should
+policy beyond "each request names one contract the runner supports, and the response echoes it"; and the sklearn pickle boundary is a residual risk that an external author should
 not inherit without a decision about signing.
+
+## 19. Phase 4 modality extensions (contract v2)
+
+This section records what Phase 4's first milestone (M1) built: contract v2, its vocabulary, its validation and the safety
+rails later milestones rely on. M1 adds **no new backend and no new task implementation**. scikit-learn, PyTorch and
+TensorFlow still declare classification and regression over number, string and boolean feature columns. Through them a
+snapshot needs v2 only when it uses the chronological split, which every runner's `prepare` implements (`split_partitions`),
+or when its dataset carries a column of a new type that is not a feature. Every Phase 1-3 snapshot is v1 and behaves as in
+Phase 3. The other tasks and the new feature types are enforced and tested, but no backend executes them yet. Later
+milestones extend this section as backends implement them.
+
+### 19.1 Versions and selection
+
+`contractFor(snapshot, task)` (`src/ml/contract.ts`) picks the version of every request; `task` is the algorithm's catalog
+task. A request is **v1** only when all of these hold, and **v2** otherwise:
+
+- the task is `classification` or `regression`;
+- the split is `random`;
+- the dataset declares a target;
+- every column is `number`, `string` or `boolean`.
+
+`uses_extensions(spec, task)` in `ml/ml_runtime_common.py` is the same rule (true exactly when v2 is needed). Every Phase 1-3
+snapshot is v1, and a v1 snapshot keeps the exact Phase 3 rules: a stored model validates, serves and resumes as before,
+including combinations v2 refuses, such as a ridge regression trained on a boolean target.
+
+### 19.2 Where it is enforced
+
+- **TypeScript, before a runner starts.** `RunnerBackend.validate` applies the v2 rules of section 19.4 only when
+  `contractFor` returns v2. `call()` sends the selected contract and, on v2, `task`.
+- **Python, before any work.** `serve(execute, task_of=...)` checks every request that carries a snapshot, except `catalog`,
+  with `require_contract(request, task_of(algorithm))`:
+  - a v1 request whose snapshot needs v2 is refused as `unsupported_contract` ("Contract v1 does not cover this request").
+    An algorithm the runner does not know counts as needing v2, so a v1 request for one is refused the same way;
+  - a v2 request whose `task` is not the runner's task for the algorithm, or whose algorithm the runner does not know, is
+    refused as `unsupported_task`.
+
+  The three runners pass `task_of` from their `MODELS` tables. `serve` without `task_of` accepts v1 only.
+- **The response.** The runner echoes the request's contract, and `callRunner` refuses any other value
+  (`runtime_incompatible`).
+- **The training processor.** Before it reads the dataset, it applies the task's cross-validation rule whichever backend
+  runs the attempt (`invalid_request`, "Cross-validation is not supported for this task and split"). After `prepare`, on a
+  chronological split, it checks that every training instant is at or before every validation instant, and every
+  validation instant at or before every test instant (`invalid_response`, "Backend returned a non-chronological split").
+  After training, it fails an embedding attempt whose artifact does not record a valid `embedding_dimension` (section 19.8).
+
+### 19.3 Vocabulary
+
+**Tasks** (`TASK_TYPES`, `src/ml/tasks.ts`): `classification`, `regression`, `forecasting`, `anomaly_detection` and
+`embedding`. `transcription` is not defined yet. The task registry `TASKS` is the single source of what a task means:
+
+| Task | Target | Target types | Splits | Cross-validation | Prediction rows carry the target | Output | Rows per prediction request |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `classification` | required | number, string, boolean | random, chronological | random split only | no | one label per row | 1,000 |
+| `regression` | required | number | random, chronological | random split only | no | one finite number per row | 1,000 |
+| `forecasting` | required | number | chronological | no | yes (history rows) | `horizon` items `{ step, timestamp, value }` | 5,000 history rows |
+| `anomaly_detection` | optional | boolean | random, chronological | no | no | `{ score, anomaly }` per row | 1,000 |
+| `embedding` | optional | number, string, boolean | random, chronological | no | no | a vector of 1 to 4,096 finite numbers per row | 256 |
+
+`maxPredictionRows(task, types)` lowers the cap when the prediction rows carry media: 32 with an image column, 16 with an
+audio column, and 64 for an embedding model with a text column.
+
+**Column types** (`COLUMN_TYPES`, `src/ml/domain.ts`): the tabular `number`, `string` and `boolean`
+(`TABULAR_COLUMN_TYPES`), plus `text`, `timestamp`, `image` and `audio`, whose cells are JSON strings. `string` and `text`
+cells hold at most 10,000 characters; timestamps, images and audio follow section 19.5.
+
+**Datasets.** The target is optional. When present it must be a number, string, boolean or text column, and the dataset needs
+another column; without a target one column is enough. No M1 task accepts a text target. A dataset version records
+`datasetValidator(schema)`: `meticule-tabular-v1` when every column is tabular, as before, and `meticule-dataset-v2` once any
+other column type appears.
+
+**Splits.** `SplitDefinition` is `random` (unchanged; `stratify` defaults to false) or `chronological` (`timeColumn` and the
+three fractions; no `stratify`, and an unknown key is refused). The fractions sum to one. `partitionSizes(split, n)` computes
+the sizes the runners produce: random follows scikit-learn's two `train_test_split` calls (`floor(n * train)`, then
+`floor(rest * validation / (validation + test))`); chronological takes `floor(n * train)` and `floor(n * validation)` and
+leaves the rest to test.
+
+**Catalog.** `ModelDefinition.inputs` and `learning` (section 5); `describeModel` returns both. The parameter kind `name` is a
+local model reference: a bounded identifier (`^[a-z0-9][a-z0-9._-]{0,63}$`), never a path, nullable with default null.
+Search refuses `name` and `intList` parameters explicitly, and AutoML plans only tabular feature columns.
+
+**Preprocessing.** Only string and boolean features count as categorical; text does not.
+
+### 19.4 Validation scope
+
+Under v2, `RunnerBackend.validate` refuses, before any runner starts:
+
+1. a task the backend does not declare;
+2. a feature count outside the model's `inputs` bounds, or a feature column type the model or the backend does not read;
+3. a missing target where the task requires one, or a target type the task does not accept;
+4. a split strategy the task does not allow; cross-validation with a chronological split or for a task without it;
+   stratification without a target;
+5. for a chronological split: a time column that is not a non-nullable `timestamp`, or a partition that `partitionSizes`
+   leaves empty for the dataset's row count. Forecasting also needs the time column as its only feature and a non-nullable
+   target;
+6. an embedding partition over 5,000 rows;
+7. preprocessing steps for a model whose inputs are not all tabular;
+8. a forecasting model without an integer `horizon` from 1 to 100 (hyperparameter or model default).
+
+The rules both versions share follow (pipeline, preprocessing operations, policy, device, precision, metrics). Metrics are
+checked with `labelled` set to whether the dataset has a target.
+
+**Rows** (`validateRows`, at ingest and at prediction): exactly the schema's columns; prediction rows leave out the target
+unless the task's prediction rows carry it (forecasting history). Each cell is checked against its column type, timestamps
+and media by section 19.5, and media is charged to the request's budget. A prediction request's row cap (section 19.3) is
+checked on the raw array before any cell is decoded. The `Rows` schema admits strings of up to 2,796,204 characters (a 2 MiB
+base64 cell), but only image and audio cells may exceed 10,000; any other long string fails with the same validation error
+at `[row, column]` as before.
+
+**Runner side** (`split_partitions`, every runner's `prepare`): the random path is the Phase 3 code unchanged; an unlabelled
+dataset splits as if every target were zero and cannot stratify. The chronological path sorts rows stably by the exact UTC
+microsecond of the time column (ties keep row order), takes the same floor sizes, and refuses an empty partition as
+`invalid_time_series`.
+
+### 19.5 Media and timestamp rules
+
+`src/ml/media.ts` (TypeScript, no dependencies) and `ml/media_common.py` (standard library and NumPy) apply the same rules;
+Python's timestamp rules are `epoch_micros` and `parse_timestamp` in `ml/ml_runtime_common.py`. TypeScript refusals are
+`ConflictError`s reading `Row i: invalid <column>: <fixed reason>`; Python refusals are `invalid_media` or
+`invalid_time_series`. No message quotes the cell.
+
+- **Base64:** the standard alphabet by the grammar `^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$` (no
+  `data:` prefix, URL-safe alphabet, whitespace or inner padding), at most 2,796,204 characters and 2 MiB decoded.
+- **Images:** PNG or JPEG, sized by a header walk; pixels are never decoded here. PNG: `IHDR` first with length 13, every
+  chunk inside the buffer, the walk ends at `IEND` (bytes after it are never read), and a second `IHDR` is refused. JPEG:
+  segments from SOI to the first SOS; `0xFF` fill bytes are allowed; every marker before SOS carries a length of at least 2
+  inside the buffer (standalone markers are refused); exactly one start-of-frame marker (C0-C3, C5-C7, C9-CB, CD-CF), whose
+  length is 8 + 3 × components (1 to 4). Each side 1 to 4,096, at most 16,777,216 pixels.
+- **Audio:** WAV only. The RIFF size equals the byte length minus 8; every chunk lies inside the buffer, and an odd-sized
+  chunk is followed by a pad byte (absent only at the very end); other chunk types are skipped; exactly one `fmt ` comes before
+  exactly one `data`. PCM 8, 16, 24 or 32-bit, or IEEE float 32-bit, directly or as `WAVE_FORMAT_EXTENSIBLE` (cbSize 22, valid
+  bits equal to bits, PCM or IEEE-float SubFormat); 1 or 2 channels; 8,000 to 48,000 Hz; `blockAlign` = channels × bits / 8
+  and `byteRate` = rate × `blockAlign`; the data is whole frames lasting 0.1 to 30 seconds; float samples are finite.
+  `read_wav` decodes a valid file to float32 samples shaped (frames, channels), PCM scaled to [-1, 1).
+- **Walk bound:** a header walk visits at most 10,000 chunks or segments, so a crafted file cannot buy unbounded work.
+- **Budgets per request:** at ingest, at most 268,435,456 pixels and 600 seconds of audio; at prediction, 67,108,864 pixels
+  and 120 seconds. Audio is counted in whole microseconds, rounded up per clip, so the sum is exact. The `/ml` body limit
+  (8,000,000 bytes, `src/ml/routes.ts`) stays the effective bound on what one request carries; the budgets bound the decoded
+  size the headers declare.
+- **Timestamps:** `YYYY-MM-DDTHH:MM`, optionally `:SS` and up to six fractional digits, then `Z` or `±HH:MM`; at most 40
+  characters, ASCII digits only; a real proleptic Gregorian date; hour 0-23, minute and second 0-59; an offset of at most
+  23:59; year 1900 to 2199. Naive timestamps are refused. Neither `Date.parse` nor `datetime.fromisoformat` is used, so the
+  rules do not depend on the runtime version. `timestampMs` returns UTC epoch milliseconds, `epoch_micros` exact integer
+  microseconds, which `split_partitions` sorts by.
+
+`tests/fixtures/media-vectors.json` (generated by `tests/python/make_media_vectors.py`, including the attack cases) lists the
+cases both sides must decide alike, verdict and facts.
+
+In M1 no runner reads media yet: `media_common` is exercised only by its tests.
+
+### 19.6 Refusal codes
+
+| Code | Category | Raised by |
+| --- | --- | --- |
+| `unsupported_task` | `unsupported_capability` | `serve`: a v2 request naming another task, or an algorithm the runner does not know |
+| `undefined_metric` | `invalid_request` | a metric with no defined value on the partition (section 19.7) |
+| `invalid_time_series` | `invalid_request` | a timestamp that breaks the rules of section 19.5; a chronological split that leaves a partition empty |
+| `invalid_media` | `invalid_request` | `media_common`: the base64, image header or WAV rules |
+
+`tests/unit/ml-contract.test.ts` checks that the Python sources emit exactly the TypeScript set.
+
+### 19.7 Metric registry
+
+`METRICS` (`src/ml/metrics.ts`) declares each metric's `tasks`, `direction`, `labels` (whether it needs the target), optional
+`needs` (the score the estimator must expose) and optional `diagnostic`. `ml/ml_runtime_common.py` mirrors tasks,
+direction, labels and diagnostic, and a unit test compares the TypeScript registry with the dump `tests/python/check_metrics.py`
+prints.
+
+| Metric | Tasks | Direction | Needs labels | Notes |
+| --- | --- | --- | --- | --- |
+| `accuracy`, `precision`, `recall`, `f1` | classification | higher | yes | as in Phase 3 |
+| `roc_auc` | classification, anomaly_detection | higher | yes | needs scores; for anomaly detection, anomaly scores against the labels |
+| `log_loss` | classification | lower | yes | needs probabilities |
+| `mae`, `rmse` | regression, forecasting | lower | yes | |
+| `mse` | regression | lower | yes | |
+| `r2` | regression | higher | yes | |
+| `smape` | forecasting | lower | yes | 0 to 200 percent; a term whose \|actual\| + \|forecast\| is 0 counts 0 |
+| `mase` | forecasting | lower | yes | scaled by the training block's seasonal-naive error |
+| `average_precision` | anomaly_detection | higher | yes | needs scores |
+| `anomaly_precision`, `anomaly_recall`, `anomaly_f1` | anomaly_detection | higher | yes | positive class = anomaly; zero division counts 0 |
+| `threshold_calibration_error` | anomaly_detection | lower | no | diagnostic: \|flagged fraction - contamination\| |
+| `retrieval_precision_at_1`, `retrieval_mrr` | embedding | higher | yes | leave-one-out cosine neighbours within the partition; relevant = same label; ties rank against the model |
+| `mean_pairwise_cosine` | embedding | lower | no | diagnostic: anisotropy |
+
+**Defaults** (`defaultMetrics(task, labelled)`, for a snapshot without `evaluation.metrics`): classification `accuracy`;
+regression `mae` and `mse` (the Phase 1 defaults, still exported as `DEFAULT_METRICS`); forecasting `mae` and `rmse`; anomaly
+detection `average_precision`, or `threshold_calibration_error` without labels; embedding `retrieval_precision_at_1`, or
+`mean_pairwise_cosine` without labels. A task that always has a target has no unlabelled default.
+
+**Refusals.** `assertMetricsSupported(model, metrics, labelled)` refuses an unknown metric, a metric for another task, one that
+needs labels on a dataset without a target, and one that needs probabilities or scores the model cannot produce. A
+diagnostic describes a model's outputs, not its quality, so experiments, AutoML and ranking refuse it
+(`assertRankingMetrics`). AutoML and experiments also refuse a dataset without a target.
+
+**Undefined values** are refused as `undefined_metric`, never reported as NaN: MASE with an empty or zero seasonal-naive
+scale; the anomaly metrics on a partition without both normal and anomalous rows; the embedding metrics with fewer than two
+rows or a zero or non-finite vector; the retrieval metrics when no row shares its label with another row.
+
+The new metrics are pure Python functions (`smape`, `mase`, `anomaly_roc_auc`, `average_precision`, `anomaly_scores`,
+`threshold_calibration_error`, `retrieval_scores`, `mean_pairwise_cosine`) with hand-computed tests. No M1 runner computes
+them yet, and `measure_predictions` is unchanged.
+
+### 19.8 Outputs
+
+`validatePredictions(task, predictions, count, environment)` (`src/ml/tasks.ts`) checks every prediction response, in
+`RunnerBackend.predict` and again in `MlModelService.predict`, which also covers backends that do not extend `RunnerBackend`.
+A mismatch is `invalid_response`, and the prediction record fails.
+
+- **Count:** one prediction per row, or for forecasting exactly `horizon` items whose `step`s run from 1 to `horizon` in
+  order and whose `timestamp`s follow section 19.5.
+- **Shape:** each item matches the task's output (section 19.3). A classification label is a string of at most 10,000
+  characters, a finite number or a boolean.
+- **Embeddings:** each vector has exactly `embedding_dimension` numbers. The value is read from the artifact's recorded
+  environment and must be spelled as a decimal integer from 1 to 4,096 (`^[1-9][0-9]{0,3}$`); it is never coerced. Training
+  fails an embedding attempt whose artifact does not record a valid one.
+- **Embedding vectors are not stored.** The prediction record's `output` is `{ digest, shape }` (the canonical-JSON SHA-256 of
+  the vectors, and `[rows, dimension]`); only the HTTP response carries `vectors`, once.
+
+### 19.9 Changes visible to existing callers
+
+v1 requests keep their meaning, but these differences reach Phase 3 callers:
+
+- `GET /ml/models` returns the registry in its new shape: each metric has `tasks` (a list) instead of `task`, plus `labels`,
+  and `diagnostic` where set; `needs` is unchanged. The new metrics are listed too.
+- A prediction batch over the row cap is refused before its cells are checked: an oversized batch with invalid cells now
+  reports `Prediction batch exceeds N rows` (409), and a batch over 50,000 rows is a 409 where it was a 400 schema error.
+- Prediction resolves the model's catalog definition before checking rows, so a READY model whose algorithm is no longer
+  registered gets a 409 instead of a FAILED prediction record. Phase 4 removes no model, so current data cannot reach this.
+- `RunnerBackend.predict` checks the count and the task's output shape itself ("Predictions did not match the task
+  contract"), and classification outputs must be labels as above rather than any JSON value.
+- A dataset schema without a target may have a single column. A chronological split refuses unknown keys, `stratify`
+  included, and a random split on a dataset without a target cannot stratify ("Stratification requires a target").
+
+### 19.10 Tests
+
+- `tests/unit/ml-contract.test.ts`: both version constants, and the refusal-code sets equal across the languages.
+- `tests/unit/ml-tasks.test.ts`: the task registry, and `contractFor` over `tests/fixtures/contract-table.json`. With
+  `ML_TEST_PYTHON`, `tests/python/contract_table.py` has Python judge the snapshots TypeScript serialises and raw envelopes,
+  and compares partition sizes with scikit-learn and the chronological rule.
+- `tests/unit/ml-media.test.ts`: every shared vector, and the TypeScript-only rules (limits, budgets).
+- `tests/unit/ml-python-runtime.test.ts`: the named checks of `tests/python/check_contract.py` (`serve` semantics and stdout
+  protection), `check_partitions.py`, `check_metrics.py` (every new metric and edge case, and the registry equality) and
+  `check_media.py` (the shared vectors through `media_common` and `parse_timestamp`).
+- `tests/unit/ml-legacy-neural.test.ts`: a frozen copy of the Phase 3 PyTorch runner trains and checkpoints; the current
+  runner predicts identically from its artifact and resumes its checkpoint.
+- `tests/unit/ml-backend.test.ts`, `ml-v2-backend.test.ts` and `ml-runner-protocol.test.ts`: the v2-only refusals, the
+  unchanged v1 envelope, a stored boolean-target ridge that still validates and predicts, and the echo rule.
+- `tests/integration/ml.test.ts`: the processor and prediction paths for forecasting and embedding, and the row caps, against a
+  test backend that declares those tasks.
+- The conformance suite (section 11): truthful `tasks` and `inputs`, and the raw-envelope checks.
+
+### 19.11 Not built in M1
+
+- No backend implements a task other than classification and regression or takes a non-tabular feature column; no runner
+  decodes media or computes the new metrics.
+- `transcription` and its metrics are not defined.
+- Image pixels are decoded only by a later runner that needs them, which re-checks the bounds above.
+- No database migration: the new snapshot fields and the embedding digest fit the existing JSON columns.

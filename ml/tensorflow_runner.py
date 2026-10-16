@@ -365,7 +365,7 @@ def execute(request):
     target = spec["dataset"]["schema"]["target"]
     if command == "prepare":
         y = np.array([row[target] for row in rows])
-        return {**common.partitions(spec, y), "environment": env}
+        return {**common.split_partitions(spec, rows, y), "environment": env}
     if command == "predict":
         bundle = load_bundle(request["artifact"], env)
         return {"predictions": predict_bundle(bundle, rows)["prediction"].tolist()}
@@ -460,4 +460,4 @@ def execute(request):
 
 
 if __name__ == "__main__":
-    sys.exit(common.serve(execute))
+    sys.exit(common.serve(execute, task_of=MODELS.get))

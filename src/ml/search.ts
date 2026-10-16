@@ -79,6 +79,7 @@ export function validateSearchSpace(model: ModelDefinition, space: SearchSpaceTy
   validateHyperparameters(model, fixed);
   for (const [name, d] of Object.entries(space)) {
     if (!(name in model.parameters)) throw new ConflictError(`${model.id}: unsupported search parameter ${name}`);
+    if (model.parameters[name]!.kind === "intList" || model.parameters[name]!.kind === "name") throw new ConflictError(`${model.id}: parameter ${name} cannot be searched`);
     if (name in fixed) throw new ConflictError(`${model.id}: ${name} is both fixed and searched`);
     const check = (value: Scalar) => { if (!model.parameterSchema.safeParse({ [name]: value }).success) throw new ConflictError(`${model.id}: invalid value for ${name}`); };
     if (d.type === "choice") {

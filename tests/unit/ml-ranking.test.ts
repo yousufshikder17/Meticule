@@ -8,6 +8,12 @@ const config = { partition: "cv" as const, primaryMetric: "f1", secondaryMetrics
 const ids = (r: ReturnType<typeof rankCandidates>) => r.entries.map(e => e.trainingRunId);
 
 describe("candidate ranking", () => {
+  it("refuses diagnostics as primary or secondary ranking objectives even without candidates", () => {
+    for (const name of ["mean_pairwise_cosine", "threshold_calibration_error"]) {
+      expect(() => rankCandidates([], { ...config, primaryMetric: name })).toThrow(/diagnostic/);
+      expect(() => rankCandidates([], { ...config, secondaryMetrics: [name] })).toThrow(/diagnostic/);
+    }
+  });
   it("orders by the metric's declared direction, never by name", () => {
     const f1 = (id: string, v: number) => candidate(id, [metric("f1", v, "higher")]);
     expect(ids(rankCandidates([f1("a", .7), f1("b", .9), f1("c", .8)], config))).toEqual(["b", "c", "a"]);

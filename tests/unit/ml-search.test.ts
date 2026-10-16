@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../../src/ml/model-catalog.js";
+import { defineModel, getModel } from "../../src/ml/model-catalog.js";
 import { generateCandidates, SearchSpace } from "../../src/ml/search.js";
 
 const forest = getModel("sklearn", "random_forest_classifier");
@@ -7,6 +7,10 @@ const space = (raw: unknown) => SearchSpace.parse(raw);
 const generate = (model = forest, s: unknown = {}, fixed = {}, strategy = "grid", max = 50, seed = 1) => generateCandidates(model, space(s), fixed, strategy, max, seed);
 
 describe("hyperparameter search", () => {
+  it("explicitly refuses name and intList search dimensions", () => {
+    const model = defineModel({ ...forest, parameters: { model: { kind: "name", default: null }, widths: { kind: "intList", minItems: 1, maxItems: 2, min: 1, max: 8, default: [2] } } });
+    for (const name of ["model", "widths"]) expect(() => generate(model, { [name]: { type: "choice", values: [null] } })).toThrow(/cannot be searched/);
+  });
   it("enumerates a grid in a stable order: sorted parameters, declared values, last parameter fastest", () => {
     const points = generate(forest, { n_estimators: { type: "choice", values: [100, 300] }, max_depth: { type: "int", min: 4, max: 12, step: 4 } });
     expect(points).toEqual([[4, 100], [4, 300], [8, 100], [8, 300], [12, 100], [12, 300]].map(([max_depth, n_estimators]) => ({ max_depth, n_estimators })));

@@ -6,9 +6,10 @@ import { canonicalJsonHash } from "../domain/canonical-json.js";
 import { RunRepository } from "../db/repositories.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, MlBackend } from "./backend.js";
-import { CvSpec, JsonObject, TrainingSnapshot, cohortKey, type MetricValue } from "./domain.js";
-import { assertMetricsSupported } from "./metrics.js";
-import { getModel, validateHyperparameters, type TaskType } from "./model-catalog.js";
+import { CvSpec, JsonObject, TrainingSnapshot, cohortKey, type DatasetSchemaType, type MetricValue } from "./domain.js";
+import { assertMetricsSupported, assertRankingMetrics } from "./metrics.js";
+import { getModel, validateHyperparameters } from "./model-catalog.js";
+import type { TaskType } from "./tasks.js";
 import { audit, MlTrainingService, authorizeMl, transaction } from "./persistence.js";
 import { AutoMlInput, planAutoMl } from "./automl.js";
 import { generateCandidates, SearchSpace } from "./search.js";
@@ -75,7 +76,7 @@ export class MlExperimentService {
     return transaction(this.pool, async c => {
       const dataset = await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.datasetVersionId]);
       if (!dataset.rowCount) throw new NotFoundError("Dataset version not found");
-      const doc = dataset.rows[0].document as { schema: { columns: { name: string; type: "number" | "string" | "boolean" }[]; target: string }; rowCount: number };
+      const doc = dataset.rows[0].document as { schema: DatasetSchemaType; rowCount: number };
       const plan = planAutoMl(input, doc.schema, doc.rowCount);
       const { idempotencyKey: _key, name: _name, experimentId: _experiment, ...definition } = input;
       const configHash = canonicalJsonHash({ kind: "automl", definition, plan });
@@ -129,9 +130,11 @@ export class MlExperimentService {
     if (!dataset.rowCount || !pipeline.rowCount) throw new NotFoundError("Dataset version or pipeline not found");
     const experiment = await c.query("SELECT id FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, plan.experimentId]);
     if (!experiment.rowCount) throw new NotFoundError("Experiment not found");
-    const schema = dataset.rows[0].document.schema as { columns: { name: string; type: string }[]; target: string };
+    const schema = dataset.rows[0].document.schema as DatasetSchemaType;
+    if (schema.target === undefined) throw new ConflictError("Experiments require a dataset target");
     if (shared.taskType === "regression" && schema.columns.find(col => col.name === schema.target)?.type !== "number") throw new ConflictError("Regression requires a numeric target");
     const metrics = [shared.evaluation.primaryMetric, ...shared.evaluation.secondaryMetrics];
+    assertRankingMetrics(metrics);
     if (new Set(metrics).size !== metrics.length) throw new ConflictError("Primary and secondary metrics must be distinct");
     const split = { id: randomUUID(), strategy: "random" as const, ...shared.split, stratify: shared.split.stratify ?? shared.taskType === "classification" };
     const specs = plan.candidates.map(candidate => {

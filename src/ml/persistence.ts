@@ -8,7 +8,7 @@ import { scopedPool } from "../db/tenant-session.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, Performance, PreparedData, TrainedModel } from "./backend.js";
 import type { EpochSummary } from "./training-policy.js";
-import { DatasetSchema, DatasetVersion, FeaturePipeline, Metric, PipelineDefinition, TrainingSnapshot, TrainingSpec, assertMetricShape, assertTrainingTransition, validateRows, validateSnapshot, type ArtifactReference, type MetricValue, type Snapshot, type TrainingState } from "./domain.js";
+import { DatasetSchema, DatasetVersion, FeaturePipeline, Metric, PipelineDefinition, TrainingSnapshot, TrainingSpec, assertMetricShape, assertTrainingTransition, datasetValidator, validateRows, validateSnapshot, type ArtifactReference, type MetricValue, type Snapshot, type TrainingState } from "./domain.js";
 
 export function authorizeMl(p: Principal, write = false): void {
   if (write && !p.roles.includes("tenant_admin")) throw new AuthorizationError("Required role: tenant_admin");
@@ -55,7 +55,7 @@ export class MlTrainingService {
         id = randomUUID(); await c.query("INSERT INTO ml_datasets(id,tenant_id,name,created_by) VALUES($1,$2,$3,$4)", [id, principal.tenantId, input.name, principal.userId]);
       }
       const versions = await c.query("SELECT COALESCE(max(version),0)+1 AS version FROM ml_dataset_versions WHERE tenant_id=$1 AND dataset_id=$2", [principal.tenantId, id]);
-      const doc = DatasetVersion.parse({ id: randomUUID(), tenantId: principal.tenantId, datasetId: id, version: versions.rows[0].version, createdAt: new Date().toISOString(), schema: input.schema, content, rowCount: rows.length, validation: { valid: true, validator: "meticule-tabular-v1" } });
+      const doc = DatasetVersion.parse({ id: randomUUID(), tenantId: principal.tenantId, datasetId: id, version: versions.rows[0].version, createdAt: new Date().toISOString(), schema: input.schema, content, rowCount: rows.length, validation: { valid: true, validator: datasetValidator(input.schema) } });
       await c.query("INSERT INTO ml_dataset_versions(id,tenant_id,dataset_id,version,document,schema_id) VALUES($1,$2,$3,$4,$5,$6)", [doc.id, principal.tenantId, id, doc.version, JSON.stringify(doc), input.schema.id]);
       await audit(c, principal.tenantId, principal.userId, "ml.dataset_version_created", { datasetId: id, versionId: doc.id }); return doc;
     });

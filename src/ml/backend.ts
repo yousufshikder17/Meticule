@@ -1,4 +1,5 @@
-import { DEVICES, PRECISIONS, type ArtifactReference, type MetricValue, type Row, type Snapshot } from "./domain.js";
+import { DEVICES, PRECISIONS, type ArtifactReference, type ColumnType, type MetricValue, type Row, type Snapshot } from "./domain.js";
+import type { TaskType } from "./tasks.js";
 
 export interface ArtifactStore {
   put(tenantId: string, bytes: Uint8Array, mediaType: string): Promise<ArtifactReference>;
@@ -29,6 +30,10 @@ export interface BackendCapabilities {
   readonly precisions: readonly Precision[];
   /** Trains in bounded, checkpointable chunks through trainChunk and exportModel. */
   readonly iterative: boolean;
+  /** Tasks the runner implements. Every registered model's task must be one of them. */
+  readonly tasks: readonly TaskType[];
+  /** Column types the runner can read as features. Every registered model's input types must be among them. */
+  readonly inputs: readonly ColumnType[];
 }
 // Backend methods do computation only. They never claim jobs or mutate durable state.
 export interface MlBackend {

@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
-import { assertMetricsSupported, isMetricName, METRICS } from "./metrics.js";
-import { getModel, type TaskType } from "./model-catalog.js";
+import { assertMetricsSupported, assertRankingMetrics, isMetricName, METRICS } from "./metrics.js";
+import { isTabularType, type DatasetSchemaType } from "./domain.js";
+import { getModel } from "./model-catalog.js";
 import type { SearchSpaceType } from "./search.js";
 
 const Name = z.string().trim().min(1).max(120);
@@ -17,7 +18,7 @@ export const AutoMlInput = z.object({
 export type AutoMlInputType = z.infer<typeof AutoMlInput>;
 
 // Cheap, interpretable families first, so small budgets still cover the useful baselines.
-const FAMILIES: Record<TaskType, string[]> = {
+const FAMILIES: Record<AutoMlInputType["taskType"], string[]> = {
   classification: ["logistic_regression", "decision_tree_classifier", "random_forest_classifier", "gradient_boosting_classifier", "k_neighbors_classifier", "svc"],
   regression: ["ridge", "linear_regression", "decision_tree_regressor", "random_forest_regressor", "gradient_boosting_regressor", "k_neighbors_regressor", "lasso", "elastic_net", "svr"],
 };
@@ -28,7 +29,6 @@ const SEARCHABLE: Record<string, SearchSpaceType> = {
   gradient_boosting_classifier: { n_estimators: choice(50, 100, 200), learning_rate: choice(.03, .1, .3), max_depth: choice(2, 3, 5) },
   gradient_boosting_regressor: { n_estimators: choice(50, 100, 200), learning_rate: choice(.03, .1, .3), max_depth: choice(2, 3, 5) },
 };
-interface Column { name: string; type: "number" | "string" | "boolean" }
 export interface AutoMlPlan {
   features: string[]; steps: { operation: string; parameters: Record<string, never> }[];
   benchmark: string[]; searches: { algorithm: string; space: SearchSpaceType; maxCandidates: number }[];
@@ -36,16 +36,18 @@ export interface AutoMlPlan {
 }
 
 /** Pure and deterministic: same schema, row count, input and budget always yield the same plan. */
-export function planAutoMl(input: AutoMlInputType, schema: { columns: Column[]; target: string }, rowCount: number): AutoMlPlan {
+export function planAutoMl(input: AutoMlInputType, schema: { columns: Pick<DatasetSchemaType["columns"][number], "name" | "type">[]; target?: string | undefined }, rowCount: number): AutoMlPlan {
+  if (schema.target === undefined) throw new ConflictError("AutoML requires a dataset target");
   if (input.target !== schema.target) throw new ConflictError(`target must be the dataset's declared target column (${schema.target})`);
   const targetType = schema.columns.find(c => c.name === schema.target)!.type;
   if (input.taskType === "regression" && targetType !== "number") throw new ConflictError("Regression requires a numeric target");
   if (rowCount < Math.max(30, input.cvFolds * 10)) throw new ConflictError(`AutoML needs at least ${Math.max(30, input.cvFolds * 10)} rows for ${input.cvFolds}-fold CV; the dataset has ${rowCount}`);
-  const features = schema.columns.filter(c => c.name !== schema.target);
+  const features = schema.columns.filter(c => c.name !== schema.target && isTabularType(c.type));
   if (!features.length) throw new ConflictError("Dataset has no feature columns");
   const metrics = [input.metric, ...input.secondaryMetrics];
+  assertRankingMetrics(metrics);
   if (new Set(metrics).size !== metrics.length) throw new ConflictError("Primary and secondary metrics must be distinct");
-  for (const name of metrics) if (!isMetricName(name) || METRICS[name].task !== input.taskType) throw new ConflictError(`Metric ${name} is unknown or does not apply to ${input.taskType}`);
+  for (const name of metrics) if (!isMetricName(name) || !METRICS[name].tasks.includes(input.taskType)) throw new ConflictError(`Metric ${name} is unknown or does not apply to ${input.taskType}`);
   const skipped: AutoMlPlan["skipped"] = []; const usable: string[] = [];
   for (const algorithm of FAMILIES[input.taskType]) {
     try { assertMetricsSupported(getModel(input.backend, algorithm), metrics); usable.push(algorithm); }

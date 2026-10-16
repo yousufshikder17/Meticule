@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Principal } from "../../src/db/types.js";
+import { ConflictError } from "../../src/domain/errors.js";
 import { RunRepository } from "../../src/db/repositories.js";
 import { LifecycleWorker } from "../../src/worker/worker.js";
 import { PostgresArtifactStore } from "../../src/ml/artifact-store.js";
@@ -143,12 +144,24 @@ describe("benchmark experiments", () => {
     const f = await fixture(); const app = new Hono<{ Variables: { principal: Principal; database: pg.Pool; correlationId: string } }>();
     app.use("*", async (c, next) => { c.set("principal", manager); c.set("database", pool); await next(); });
     registerMlRoutes(app, { enabled: true, backends: f.backends });
-    const catalog = await (await app.request("/ml/models")).json(); expect(catalog.models.filter((m: { backend: string }) => m.backend === "sklearn")).toHaveLength(15); expect(catalog.models.find((m: { id: string }) => m.id === "mlp_classifier")).toMatchObject({ backend: "pytorch", available: false, capabilities: { iterative: true } }); expect(catalog.metrics.f1.direction).toBe("higher");
+    const catalog = await (await app.request("/ml/models")).json(); expect(catalog.models.filter((m: { backend: string }) => m.backend === "sklearn")).toHaveLength(15); expect(catalog.models.find((m: { backend: string; id: string }) => m.backend === "pytorch" && m.id === "mlp_classifier")).toMatchObject({ available: false, capabilities: { iterative: true } }); expect(catalog.metrics.f1.direction).toBe("higher");
     const post = await app.request("/ml/benchmarks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input(f.dataset, f.pipeline)) });
     expect(post.status).toBe(202); const created = await post.json(); await f.drain();
     const got = await (await app.request(`/ml/benchmarks/${created.orchestration.id}`)).json(); expect(got.orchestration.status).toBe("COMPLETED");
     const ranking = await (await app.request(`/ml/experiments/${created.orchestration.id}/ranking`)).json(); expect(ranking.final).toBe(true); expect(ranking.ranking.entries[0].label).toBe("random_forest_classifier");
     expect((await (await app.request("/ml/benchmarks")).json())).toHaveLength(1);
+  });
+  it("refuses a benchmark on a dataset without a target, or ranked by a diagnostic metric, before queuing anything", async () => {
+    const f = await fixture(); const app = new Hono<{ Variables: { principal: Principal; database: pg.Pool; correlationId: string } }>();
+    app.use("*", async (c, next) => { c.set("principal", manager); c.set("database", pool); await next(); });
+    registerMlRoutes(app, { enabled: true, backends: f.backends });
+    app.onError((error, c) => c.json({ message: error.message }, error instanceof ConflictError ? 409 : 500)); // as src/api/app.ts maps it
+    const unlabelled = await f.training.ingest(manager, { name: "unlabelled", schema: { id: randomUUID(), columns: [{ name: "x", type: "number" }, { name: "label", type: "string" }] }, rows: Array.from({ length: 60 }, (_, i) => ({ x: i, label: i % 2 ? "odd" : "even" })) });
+    const post = (body: object) => app.request("/ml/benchmarks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    for (const [body, message] of [[input(unlabelled, f.pipeline), /require a dataset target/], [input(f.dataset, f.pipeline, { evaluation: { primaryMetric: "mean_pairwise_cosine", secondaryMetrics: [] } }), /diagnostic and cannot rank/]] as const) {
+      const response = await post(body); expect(response.status).toBe(409); expect(await response.text()).toMatch(message);
+    }
+    expect((await pool.query("SELECT (SELECT count(*) FROM ml_orchestrations)::int AS o, (SELECT count(*) FROM runs)::int AS r")).rows[0]).toEqual({ o: 0, r: 0 });
   });
 });
 

@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ConflictError } from "../../src/domain/errors.js";
 import type { MlBackend, PreparedData, TrainedModel } from "../../src/ml/backend.js";
-import { ML_BACKEND_CONTRACT, MlBackendFailure } from "../../src/ml/contract.js";
+import { contractFor, ML_BACKEND_CONTRACT, ML_BACKEND_CONTRACT_V2, MlBackendFailure } from "../../src/ml/contract.js";
 import { type Row, type Snapshot, TrainingSnapshot } from "../../src/ml/domain.js";
 import { getModel, listModels } from "../../src/ml/model-catalog.js";
 import { OPERATIONS } from "../../src/ml/preprocessing.js";
@@ -92,6 +92,24 @@ export function snapshotWith(backendId: string, configured: Configured, task: "c
   return { ...base, ...overrides } as Snapshot;
 }
 
+// ---- Contract v2 on a registered tabular model: a non-feature timestamp column and a chronological split. Rows are out of
+// time order (row i holds hour 37i mod 90), so a random split cannot pass for a chronological one.
+export const CHRONO_ROWS: Row[] = ROWS.map((row, i) => ({ ...row, at: new Date(Date.UTC(2024, 0, 1) + (i * 37 % 90) * 3_600_000).toISOString() }));
+export function chronologicalSnapshot(backendId: string, configured: Configured, task: "classification" | "regression"): Snapshot {
+  return snapshotFor({
+    backend: backendId, algorithm: configured.algorithm, columns: [...COLUMNS, { name: "at", type: "timestamp" }], target: task === "classification" ? "label" : "y",
+    features: ["x", "z"], steps: [{ operation: "standard_scale" }], hyperparameters: configured.hyperparameters, rowCount: CHRONO_ROWS.length,
+    split: { strategy: "chronological", timeColumn: "at" },
+  });
+}
+/** Train, validation and test (each in its stored order, concatenated) are non-decreasing in time, with 54/18/18 rows. */
+export function expectTimeOrdered(prepared: PreparedData): void {
+  const { train, validation, test } = prepared.indices;
+  expect([train.length, validation.length, test.length]).toEqual([54, 18, 18]);
+  const times = [...train, ...validation, ...test].map(i => Date.parse(CHRONO_ROWS[i]!.at as string));
+  for (let i = 1; i < times.length; i++) expect(times[i]!).toBeGreaterThanOrEqual(times[i - 1]!);
+}
+
 /** The same snapshot with a different preprocessing pipeline. The ids stay fixed, so only the pipeline changes. */
 function withSteps(base: Snapshot, steps: { operation: string; parameters?: Record<string, unknown> }[]): Snapshot {
   return { ...base, pipeline: { ...base.pipeline, definition: { features: ["x", "z"], steps: steps.map(s => ({ operation: s.operation, parameters: s.parameters ?? {} })) } } } as Snapshot;
@@ -121,7 +139,7 @@ function expectBoundedMessage(message: string): void {
 /** Runs the runner script directly over stdin, with an explicit envelope, and reports its exit status and stderr. */
 function runRaw(target: ConformanceTarget, envelope: object) {
   const result = spawnSync(target.python, [target.script], { input: JSON.stringify(envelope), encoding: "utf8", timeout: 60_000 });
-  return { status: result.status, stderr: result.stderr ?? "" };
+  return { status: result.status, stderr: result.stderr ?? "", stdout: result.stdout ?? "" };
 }
 function stderrCode(stderr: string): string | undefined {
   try { return (JSON.parse(stderr.trim().split("\n").pop() ?? "") as { code?: string }).code; } catch { return undefined; }
@@ -164,10 +182,17 @@ export function describeContract(target: ConformanceTarget): void {
         const models = listModels(target.id);
         expect(models.length).toBeGreaterThan(0);
         for (const m of models) {
+          expect(capabilities.tasks).toContain(m.taskType);
+          for (const type of m.inputs.types) expect(capabilities.inputs).toContain(type);
           for (const device of m.capabilities.devices ?? []) expect(capabilities.devices).toContain(device);
           if (m.capabilities.mixedPrecision) expect(capabilities.precisions).toContain("mixed");
           if (m.capabilities.iterative) expect(iterative).toBe(true);
         }
+      });
+      it("is truthful about tasks and inputs: each declared one is used by a registered model", () => {
+        const models = listModels(target.id);
+        expect([...capabilities.tasks].sort()).toEqual([...new Set(models.map(m => m.taskType))].sort());
+        expect([...capabilities.inputs].sort()).toEqual([...new Set(models.flatMap(m => m.inputs.types))].sort());
       });
       it("registers its configured classification and regression models", () => {
         expect(getModel(target.id, target.classification.algorithm).taskType).toBe("classification");
@@ -258,6 +283,22 @@ export function describeContract(target: ConformanceTarget): void {
         expect(out).toHaveLength(5);
         for (const v of out) expect(Number.isFinite(v as number)).toBe(true);
       }, FRAMEWORK_TRAINING_BUDGET);
+      it("runs a contract v2 chronological split end to end: prepare, train, evaluate and predict", async () => {
+        const snap = chronologicalSnapshot(target.id, target.classification, "classification");
+        expect(contractFor(snap, "classification")).toBe(ML_BACKEND_CONTRACT_V2);
+        const fresh = target.create(), calls = vi.spyOn(fresh as unknown as { call(...args: unknown[]): Promise<unknown> }, "call");
+        const p = await fresh.prepare(snap, CHRONO_ROWS, signal());
+        expectTimeOrdered(p);
+        const m = await fresh.train(snap, CHRONO_ROWS, p, signal());
+        const metrics = await fresh.evaluate(snap, CHRONO_ROWS, p, m, signal());
+        for (const partition of ["train", "validation", "test"]) expect(metrics.some(x => x.partition === partition)).toBe(true);
+        const out = await fresh.predict(snap, m.bytes, CHRONO_ROWS.slice(0, 7), m.environment, signal());
+        expect(out).toHaveLength(7);
+        for (const v of out) expect(["a", "b"]).toContain(v);
+        // Every runner call (training may be chunked) spoke v2 and the runner echoed it.
+        expect(calls.mock.calls.length).toBeGreaterThanOrEqual(4);
+        for (const r of calls.mock.results) expect(((await r.value) as { contract: string }).contract).toBe(ML_BACKEND_CONTRACT_V2);
+      }, FRAMEWORK_TRAINING_BUDGET);
     });
 
     describe("artifacts: compatibility is enforced, provenance is not", () => {
@@ -304,6 +345,22 @@ export function describeContract(target: ConformanceTarget): void {
         const result = runRaw(target, { command: "unknown_command", contract: ML_BACKEND_CONTRACT });
         expect(stderrCode(result.stderr)).not.toBe("unsupported_contract");
       });
+      it("enforces v1 semantics on prepare and predict and v2 task agreement before computation", () => {
+        const snapshot = snapshotWith(target.id, target.classification, "classification");
+        // A timestamp column is Phase 4 vocabulary, so a v1 envelope carrying it is refused before any work (A5).
+        const extended = { ...snapshot, dataset: { ...snapshot.dataset, schema: { ...snapshot.dataset.schema, columns: [...snapshot.dataset.schema.columns, { name: "at", type: "timestamp", nullable: false }] } } };
+        for (const command of ["prepare", "predict"]) {
+          const result = runRaw(target, { command, contract: ML_BACKEND_CONTRACT, snapshot: extended, rows: ROWS });
+          expect(result.status).toBe(1); expect(stderrCode(result.stderr)).toBe("unsupported_contract");
+        }
+        // v2 names the algorithm's task: another task (even one the runner implements) or an unknown algorithm is refused.
+        for (const change of [{ task: "regression", snapshot }, { task: "embedding", snapshot }, { task: "classification", snapshot: { ...snapshot, algorithm: "unknown" } }]) {
+          const result = runRaw(target, { command: "prepare", contract: ML_BACKEND_CONTRACT_V2, rows: ROWS, ...change });
+          expect(result.status).toBe(1); expect(stderrCode(result.stderr)).toBe("unsupported_task");
+        }
+        const accepted = runRaw(target, { command: "prepare", contract: ML_BACKEND_CONTRACT_V2, task: "classification", snapshot, rows: ROWS });
+        expect(accepted.status).toBe(0); expect(JSON.parse(accepted.stdout).contract).toBe(ML_BACKEND_CONTRACT_V2);
+      }, 180_000);
     });
 
     describe("declared preprocessing is executed with the platform's semantics", () => {

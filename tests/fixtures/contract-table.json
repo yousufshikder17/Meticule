@@ -1,0 +1,19 @@
+{
+ "about": "Representative snapshots and the contract each one needs (spec amendment A5). contractFor in src/ml/contract.ts and uses_extensions in ml/ml_runtime_common.py must both reproduce `contract` for every row. `task` is the model's catalog task; `split` and `schema` have the snapshot's shape (a schema without `target` declares none).",
+ "rows": [
+  {"id": "classification-tabular", "task": "classification", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "b", "type": "string"}, {"name": "c", "type": "boolean"}, {"name": "label", "type": "string"}], "target": "label"}, "contract": "meticule-ml-backend/v1"},
+  {"id": "regression-tabular", "task": "regression", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "y", "type": "number"}], "target": "y"}, "contract": "meticule-ml-backend/v1"},
+  {"id": "regression-boolean-target", "task": "regression", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "flag", "type": "boolean"}], "target": "flag"}, "contract": "meticule-ml-backend/v1"},
+  {"id": "classification-unused-timestamp-column", "task": "classification", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "at", "type": "timestamp"}, {"name": "label", "type": "string"}], "target": "label"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "classification-text-column", "task": "classification", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "review", "type": "text"}, {"name": "label", "type": "string"}], "target": "label"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "classification-image-column", "task": "classification", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "photo", "type": "image"}, {"name": "label", "type": "string"}], "target": "label"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "regression-audio-column", "task": "regression", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "clip", "type": "audio"}, {"name": "y", "type": "number"}], "target": "y"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "classification-chronological", "task": "classification", "split": {"strategy": "chronological", "timeColumn": "at"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "at", "type": "timestamp"}, {"name": "label", "type": "string"}], "target": "label"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "regression-without-target", "task": "regression", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "b", "type": "number"}]}, "contract": "meticule-ml-backend/v2"},
+  {"id": "forecasting", "task": "forecasting", "split": {"strategy": "chronological", "timeColumn": "at"}, "schema": {"columns": [{"name": "at", "type": "timestamp"}, {"name": "y", "type": "number"}], "target": "y"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "anomaly-labelled-tabular", "task": "anomaly_detection", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "anomaly", "type": "boolean"}], "target": "anomaly"}, "contract": "meticule-ml-backend/v2"},
+  {"id": "anomaly-unlabelled", "task": "anomaly_detection", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "b", "type": "number"}]}, "contract": "meticule-ml-backend/v2"},
+  {"id": "embedding-text-unlabelled", "task": "embedding", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "passage", "type": "text"}]}, "contract": "meticule-ml-backend/v2"},
+  {"id": "embedding-labelled-tabular", "task": "embedding", "split": {"strategy": "random"}, "schema": {"columns": [{"name": "a", "type": "number"}, {"name": "label", "type": "string"}], "target": "label"}, "contract": "meticule-ml-backend/v2"}
+ ]
+}

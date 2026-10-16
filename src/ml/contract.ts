@@ -1,12 +1,30 @@
 /**
- * Meticule ML Backend Contract v1. Internal only: not a public SDK, and no third-party code is loaded through it.
+ * Meticule ML Backend Contracts. Internal only: not a public SDK, and no third-party code is loaded through it.
  *
- * Every runner request carries this version and every successful runner response echoes it. Either side refuses a
- * mismatch, so a future v2 can coexist or fail explicitly instead of being misread.
+ * Every runner request carries a version and every successful runner response echoes it. Either side refuses a
+ * mismatch, so versions coexist or fail explicitly instead of being misread. v2 is v1 plus the Phase 4 vocabulary
+ * (tasks beyond classification/regression, column types beyond number/string/boolean, the chronological split,
+ * datasets without a target); envelope, commands, failure categories and artifacts are the same.
  */
 import { ConflictError } from "../domain/errors.js";
+import { isTabularType, type Snapshot } from "./domain.js";
+import type { TaskType } from "./tasks.js";
 
 export const ML_BACKEND_CONTRACT = "meticule-ml-backend/v1";
+export const ML_BACKEND_CONTRACT_V2 = "meticule-ml-backend/v2";
+export const ML_BACKEND_CONTRACTS = [ML_BACKEND_CONTRACT, ML_BACKEND_CONTRACT_V2] as const;
+export type MlBackendContract = (typeof ML_BACKEND_CONTRACTS)[number];
+
+/**
+ * The contract a request needs (spec sec. 1): v1 only for a classification or regression task on a random split of a
+ * dataset that declares a target and whose columns are all number, string or boolean; v2 otherwise. `task` is the
+ * algorithm's catalog task. ml/ml_runtime_common.py uses_extensions mirrors this exactly.
+ */
+export function contractFor(snapshot: Snapshot, task: TaskType): MlBackendContract {
+  const { schema } = snapshot.dataset;
+  return (task === "classification" || task === "regression") && snapshot.split.strategy === "random" && schema.target !== undefined && schema.columns.every(c => isTabularType(c.type))
+    ? ML_BACKEND_CONTRACT : ML_BACKEND_CONTRACT_V2;
+}
 
 /**
  * Bounded, machine-readable failure categories. Backend and runner failures are mapped into these before they leave
@@ -44,6 +62,10 @@ const RUNNER_CODES: Record<string, MlFailureCategory> = {
   cuda_unsupported: "unsupported_capability",
   mixed_requires_cuda: "unsupported_capability",
   unsupported_device_or_precision: "unsupported_capability",
+  unsupported_task: "unsupported_capability",
+  undefined_metric: "invalid_request",
+  invalid_time_series: "invalid_request",
+  invalid_media: "invalid_request",
 };
 
 /** Every refusal code a runner may print. The Python runners must emit exactly this set (see the contract unit test). */

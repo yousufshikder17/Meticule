@@ -64,7 +64,9 @@ RUNTIME_KEYS = ("sklearn", "numpy", "scipy", "joblib", "threadpoolctl")
 
 
 IncompatibleArtifact = common.IncompatibleArtifact
-DIRECTIONS, TASK_METRICS = common.DIRECTIONS, common.TASK_METRICS
+TASK_METRICS = common.TASK_METRICS
+# This runner's metrics only, so the catalog lists what it computes (the shared registry also covers Phase 4 tasks).
+DIRECTIONS = {name: common.DIRECTIONS[name] for task in ("classification", "regression") for name in TASK_METRICS[task]}
 CONTRACT = {"backend": BACKEND, "artifact_format": ARTIFACT_FORMAT, "protocols": SUPPORTED_PROTOCOLS,
             "schemas": SUPPORTED_SCHEMAS, "runtime_keys": RUNTIME_KEYS}
 
@@ -193,7 +195,7 @@ def execute(request):
     y = np.array([row[spec["dataset"]["schema"]["target"]] for row in rows])
     cv = (spec.get("evaluation") or {}).get("cv")
     if command == "prepare":
-        result = {**common.partitions(spec, y), "environment": env}
+        result = {**common.split_partitions(spec, rows, y), "environment": env}
         return result
     if command == "train":
         pipeline = build_pipeline(spec)
@@ -243,4 +245,4 @@ def execute(request):
 
 
 if __name__ == "__main__":
-    sys.exit(common.serve(execute))
+    sys.exit(common.serve(execute, task_of=lambda algorithm: MODELS[algorithm][1] if algorithm in MODELS else None))

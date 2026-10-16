@@ -13,6 +13,8 @@ import { TrainingProcessor } from "../../src/ml/training-processor.js";
 import { MlModelService } from "../../src/ml/model-service.js";
 import type { MlBackend, PreparedData, TrainedModel } from "../../src/ml/backend.js";
 import { SklearnBackend } from "../../src/ml/sklearn-backend.js";
+import { defineModel, registerModels } from "../../src/ml/model-catalog.js";
+import { canonicalJsonHash } from "../../src/domain/canonical-json.js";
 import type { MetricValue, Row, Snapshot } from "../../src/ml/domain.js";
 import { createApp } from "../../src/api/app.js";
 import { JwtAuthenticator } from "../../src/auth/authentication.js";
@@ -21,9 +23,16 @@ const pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL ?? pr
 const manager: Principal = { tenantId: "11111111-1111-4111-8111-111111111111", userId: "22222222-2222-4222-8222-222222222222", roles: ["tenant_admin"] };
 const outsider: Principal = { ...manager, tenantId: "33333333-3333-4333-8333-333333333333" };
 let store: PostgresArtifactStore;
+// The processor and model service resolve a task only through the catalog (B1), so the test backend registers its models.
+const unscored = { scores: "none", scaleSensitive: false, seeded: true } as const;
+registerModels([
+  defineModel({ backend: "test-ml", id: "ridge", taskType: "regression", displayName: "Test ridge", parameters: { alpha: { kind: "float", min: 0, max: 100, default: 1 } }, capabilities: unscored }),
+  defineModel({ backend: "test-ml", id: "embed", taskType: "embedding", displayName: "Test embedding", parameters: {}, capabilities: unscored, inputs: { types: ["text"], min: 1, max: 1 }, learning: "pretrained" }),
+  defineModel({ backend: "test-ml", id: "forecast", taskType: "forecasting", displayName: "Test forecast", parameters: { horizon: { kind: "int", min: 1, max: 100, default: 2 } }, capabilities: unscored, inputs: { types: ["timestamp"], min: 1, max: 1 } }),
+]);
 class TestBackend implements MlBackend {
   readonly id = "test-ml";
-  readonly capabilities = { artifactFormats: ["test-v1"], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: [], iterative: false } as const;
+  readonly capabilities = { artifactFormats: ["test-v1"], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: [], iterative: false, tasks: ["regression", "embedding", "forecasting"], inputs: ["number", "string", "boolean", "text", "timestamp"] } as const;
   validate(): void {}
   async prepare(_s: Snapshot, rows: Row[]): Promise<PreparedData> { return { indices: { train: rows.map((_, i) => i).slice(0, 36), validation: rows.map((_, i) => i).slice(36, 48), test: rows.map((_, i) => i).slice(48) }, environment: { protocol: "test" } }; }
   async train(): Promise<TrainedModel> { return { bytes: Buffer.from("test-model"), format: "test-v1", environment: { protocol: "test" }, resolvedHyperparameters: { alpha: 1 } }; }
@@ -261,6 +270,54 @@ describe("durable ML subsystem", () => {
     } finally { await client.query("ROLLBACK"); client.release(); }
     expect((await f.training.getJob(manager, f.job.id)).job.status).toBe("QUEUED");
     expect((await pool.query("SELECT 1 FROM schema_migrations WHERE version='002_ml'")).rowCount).toBe(0);
+  });
+  it("checks v2 attempts in the processor and serves forecasts and unstored embeddings", async () => {
+    const backend = new TestBackend(), backends = new Map([[backend.id, backend]]), signal = new AbortController().signal;
+    const training = new MlTrainingService(pool, store), models = new MlModelService(pool, store, backends);
+    const worker = new LifecycleWorker(pool, { workerId: "ml-v2", leaseSeconds: 30, kind: "ml" }, new TrainingProcessor(pool, store, backends));
+    const experiment = await training.experiment(manager, "v2");
+    const day = (i: number) => new Date(Date.UTC(2024, 0, 1) + i * 86_400_000).toISOString();
+    // TestBackend splits by row order (36 train, 12 validation, 12 test), so row order decides whether a split is chronological.
+    const attempt = async (schema: object, rows: Row[], algorithm: string, features: string[], spec: object = {}) => {
+      const dataset = await training.ingest(manager, { name: algorithm, schema: { id: randomUUID(), ...schema }, rows });
+      const pipeline = await training.pipeline(manager, { name: algorithm, definition: { features, steps: [] } });
+      const job = await training.queue(manager, { experimentId: experiment.id, spec: { datasetVersionId: dataset.id, featurePipelineId: pipeline.id, backend: backend.id, algorithm, seed: 1, split: { id: randomUUID(), strategy: "random", train: .6, validation: .2, test: .2 }, ...spec } });
+      await worker.tick(); return (await training.getJob(manager, job.id)).attempts[0];
+    };
+    const serve = async (trainingRunId: string) => {
+      const registry = await models.registry(manager, { name: `v2 ${trainingRunId}` }); const version = await models.register(manager, registry.id, { trainingRunId });
+      await models.transition(manager, version.id, "READY"); return (await models.endpoint(manager, { name: "v2", modelVersionId: version.id })).id as string;
+    };
+
+    const series = { columns: [{ name: "at", type: "timestamp" }, { name: "y", type: "number" }], target: "y" }, history = (i: number) => ({ at: day(i), y: i });
+    const chronological = { split: { id: randomUUID(), strategy: "chronological", timeColumn: "at", train: .6, validation: .2, test: .2 } };
+    expect((await attempt(series, Array.from({ length: 60 }, (_, i) => history(60 - i)), "forecast", ["at"], chronological)).failure).toMatchObject({ category: "invalid_response", message: "Backend returned a non-chronological split" });
+    expect((await attempt(series, Array.from({ length: 60 }, (_, i) => history(i)), "forecast", ["at"], { ...chronological, evaluation: { cv: { strategy: "kfold", folds: 2 } } })).failure).toMatchObject({ category: "invalid_request", message: "Cross-validation is not supported for this task and split" });
+    const forecast = await attempt(series, Array.from({ length: 60 }, (_, i) => history(i)), "forecast", ["at"], chronological);
+    expect(forecast.status).toBe("COMPLETED");
+    // Forecasting reads history rows that carry the target and returns `horizon` (default 2) items.
+    const items = [1, 2].map(step => ({ step, timestamp: day(59 + step), value: 59 + step }));
+    backend.predict = async () => items;
+    const forecastEndpoint = await serve(forecast.id);
+    expect(await models.predict(manager, forecastEndpoint, [history(58), history(59)], signal)).toMatchObject({ status: "COMPLETED", output: items });
+    await expect(models.predict(manager, forecastEndpoint, [{ at: day(59) }], signal)).rejects.toThrow(/missing columns/);
+    backend.predict = async () => items.slice(0, 1);
+    expect(await models.predict(manager, forecastEndpoint, [history(59)], signal)).toMatchObject({ status: "FAILED", output: null });
+
+    // An embedding attempt must record a valid dimension (E1); its vectors are returned but never stored (E2).
+    const corpus = { columns: [{ name: "t", type: "text" }] }, documents = Array.from({ length: 60 }, (_, i) => ({ t: `document ${i}` }));
+    expect((await attempt(corpus, documents, "embed", ["t"])).failure).toMatchObject({ category: "invalid_response", message: "Invalid embedding dimension" });
+    const train = backend.train.bind(backend);
+    backend.train = async () => ({ ...(await train()), environment: { protocol: "test", embedding_dimension: "2" } });
+    const embedded = await attempt(corpus, documents, "embed", ["t"]);
+    expect(embedded.status).toBe("COMPLETED");
+    const vectors = [[0, 1], [1, 1]], stored = { digest: canonicalJsonHash(vectors), shape: [2, 2] };
+    backend.predict = async (_s, _a, rows) => rows.map((_, i) => [i, 1]);
+    const embeddingEndpoint = await serve(embedded.id);
+    const response = await models.predict(manager, embeddingEndpoint, [{ t: "a" }, { t: "b" }], signal);
+    expect(response).toMatchObject({ status: "COMPLETED", output: stored, vectors });
+    expect((await pool.query("SELECT output FROM ml_predictions WHERE id=$1", [response.id])).rows[0].output).toEqual(stored);
+    await expect(models.predict(manager, embeddingEndpoint, Array.from({ length: 65 }, () => ({ t: "a" })), signal)).rejects.toThrow(/exceeds 64 rows/);
   });
   it.runIf(Boolean(process.env.ML_TEST_PYTHON))("executes real sklearn through the PostgreSQL lifecycle and registry", async () => {
     const f = await fixture(new SklearnBackend(process.env.ML_TEST_PYTHON!)); await f.worker.tick();

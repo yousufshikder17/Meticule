@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
 import type { MetricValue } from "./domain.js";
-import { METRICS, isMetricName } from "./metrics.js";
+import { METRICS, assertRankingMetrics, isMetricName } from "./metrics.js";
 
 // "Best" always means best under this persisted objective, not a universal claim about a model.
 export const RankingConfig = z.object({
@@ -35,6 +35,7 @@ function pick(metrics: MetricValue[], name: string, partition: string) {
 
 export function rankCandidates(candidates: readonly RankableCandidate[], rawConfig: z.input<typeof RankingConfig>): Ranking {
   const config = RankingConfig.parse(rawConfig);
+  assertRankingMetrics([config.primaryMetric, ...config.secondaryMetrics]);
   const scored: (RankedEntry & { runId: string })[] = []; const unranked: Ranking["unranked"] = [];
   for (const c of candidates) {
     const primary = pick(c.metrics, config.primaryMetric, config.partition);

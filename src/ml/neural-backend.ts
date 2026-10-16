@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { BackendCapabilities, ChunkResult, Device, PreparedData, TrainedModel } from "./backend.js";
-import type { Row, Snapshot } from "./domain.js";
+import { TABULAR_COLUMN_TYPES, type Row, type Snapshot } from "./domain.js";
 import { RunnerBackend, RunnerResponse } from "./runner-backend.js";
 
 // Operations the NumPy preprocessing shared by the neural runners (ml/neural_common.py) interprets. Others fail explicitly.
@@ -38,6 +38,8 @@ export class NeuralRunnerBackend extends RunnerBackend {
       precisions: options.mixedPrecision ? ["fp32", "mixed"] : ["fp32"],
       preprocessing: NEURAL_OPERATIONS,
       iterative: true,
+      tasks: ["classification", "regression"],
+      inputs: TABULAR_COLUMN_TYPES,
     };
     super({ id: options.id, capabilities, python: options.python, script: options.script, timeoutMs: options.timeoutMs });
     this.checkpointFormat = options.checkpointFormat;

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import type { BackendCapabilities } from "./backend.js";
+import { TABULAR_COLUMN_TYPES } from "./domain.js";
 import { RunnerBackend } from "./runner-backend.js";
 
 // Every preprocessing operation the scikit-learn runner interprets (ml/sklearn_runner.py build_pipeline).
@@ -16,6 +17,8 @@ export const SKLEARN_CAPABILITIES = {
   precisions: ["fp32"],
   preprocessing: SKLEARN_PREPROCESSING,
   iterative: false,
+  tasks: ["classification", "regression"],
+  inputs: TABULAR_COLUMN_TYPES,
 } as const satisfies BackendCapabilities;
 
 export class SklearnBackend extends RunnerBackend {

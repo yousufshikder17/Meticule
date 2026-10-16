@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
+import { TABULAR_COLUMN_TYPES, type ColumnType } from "./domain.js";
+import type { TaskType } from "./tasks.js";
 
-export type TaskType = "classification" | "regression";
 type Scalar = string | number | boolean | null;
 // Defaults may be scalars or bounded integer lists (neural-network layer widths).
 type DefaultValue = Scalar | number[];
@@ -12,7 +13,16 @@ export type ParameterSpec =
   | { kind: "choice"; values: readonly Scalar[]; default: Scalar }
   | { kind: "bool"; default: boolean }
   // Bounded list of integers, e.g. hidden layer widths. Only neural definitions use it; search spaces reject it.
-  | { kind: "intList"; minItems: number; maxItems: number; min: number; max: number; default: number[] };
+  | { kind: "intList"; minItems: number; maxItems: number; min: number; max: number; default: number[] }
+  // A local model reference (pretrained weights provisioned under the model root): a bounded identifier, never a path.
+  // Nullable with default null; search spaces and AutoML reject it.
+  | { kind: "name"; default: null };
+const MODEL_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** Column types a model reads as features, and how many feature columns it takes. */
+export interface ModelInputs { readonly types: readonly ColumnType[]; readonly min: number; readonly max: number }
+/** supervised fits with labels; unsupervised fits without; pretrained applies fixed weights and fits nothing (a pretrained classifier only binds its label set). */
+export type Learning = "supervised" | "unsupervised" | "pretrained";
+const TABULAR_INPUTS: ModelInputs = { types: TABULAR_COLUMN_TYPES, min: 1, max: 199 };
 export interface ModelCapabilities {
   /** Which per-class score the estimator exposes; gates roc_auc (probability|decision, binary only for decision) and log_loss (probability). */
   scores: "probability" | "decision" | "none";
@@ -35,6 +45,8 @@ export interface ModelDefinition {
   parameterSchema: z.ZodType<Record<string, unknown>>;
   defaults: Record<string, DefaultValue>;
   capabilities: ModelCapabilities;
+  inputs: ModelInputs;
+  learning: Learning;
   /** Cross-parameter rule; returns a message when the combination is impossible or silently ignored. */
   check?: ((params: Record<string, unknown>) => string | null) | undefined;
 }
@@ -47,14 +59,18 @@ function schemaFor(parameters: Record<string, ParameterSpec>): z.ZodType<Record<
     else if (spec.kind === "float") type = spec.openMin ? z.number().gt(spec.min).max(spec.max) : z.number().min(spec.min).max(spec.max);
     else if (spec.kind === "bool") type = z.boolean();
     else if (spec.kind === "intList") type = z.array(z.int().min(spec.min).max(spec.max)).min(spec.minItems).max(spec.maxItems);
+    else if (spec.kind === "name") type = z.string().regex(MODEL_NAME).nullable();
     else type = z.union(spec.values.map(v => z.literal(v)) as unknown as [z.ZodType, z.ZodType]);
     shape[name] = type.optional();
   }
   return z.strictObject(shape);
 }
-/** Backend-neutral definition builder: the catalog is data, and a backend's definitions are registered, not branched on. */
-export function defineModel(model: { backend: string; id: string; taskType: TaskType; displayName: string; parameters: Record<string, ParameterSpec>; capabilities: ModelCapabilities; check?: ModelDefinition["check"] }): ModelDefinition {
-  return { ...model, parameterSchema: schemaFor(model.parameters), defaults: Object.fromEntries(Object.entries(model.parameters).map(([k, v]) => [k, v.default])) };
+/**
+ * Backend-neutral definition builder: the catalog is data, and a backend's definitions are registered, not branched on.
+ * Without `inputs` a model reads 1-199 tabular columns; without `learning` it is supervised.
+ */
+export function defineModel(model: { backend: string; id: string; taskType: TaskType; displayName: string; parameters: Record<string, ParameterSpec>; capabilities: ModelCapabilities; inputs?: ModelInputs; learning?: Learning; check?: ModelDefinition["check"] }): ModelDefinition {
+  return { ...model, inputs: model.inputs ?? TABULAR_INPUTS, learning: model.learning ?? "supervised", parameterSchema: schemaFor(model.parameters), defaults: Object.fromEntries(Object.entries(model.parameters).map(([k, v]) => [k, v.default])) };
 }
 function define(id: string, taskType: TaskType, displayName: string, parameters: Record<string, ParameterSpec>, capabilities: ModelCapabilities, check?: ModelDefinition["check"]): ModelDefinition {
   return defineModel({ backend: "sklearn", id, taskType, displayName, parameters, capabilities, check });
@@ -110,4 +126,4 @@ export function validateHyperparameters(model: ModelDefinition, raw: unknown): R
   if (problem) throw new ConflictError(`${model.id}: ${problem}`);
   return params;
 }
-export const describeModel = ({ id, backend, taskType, displayName, parameters, defaults, capabilities }: ModelDefinition) => ({ id, backend, taskType, displayName, parameters, defaults, capabilities });
+export const describeModel = ({ id, backend, taskType, displayName, parameters, defaults, capabilities, inputs, learning }: ModelDefinition) => ({ id, backend, taskType, displayName, parameters, defaults, capabilities, inputs, learning });

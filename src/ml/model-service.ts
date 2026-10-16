@@ -7,6 +7,8 @@ import type { ArtifactStore, MlBackend } from "./backend.js";
 import { failureCategory, MlBackendFailure } from "./contract.js";
 import { TrainingSnapshot, assertModelTransition, cohortKey, compareMetrics, validateRows, type ModelState, type MetricValue } from "./domain.js";
 import { audit, authorizeMl, transaction } from "./persistence.js";
+import { getModel } from "./model-catalog.js";
+import { TASKS, embeddingDimension, maxPredictionRows, predictionCount, validatePredictions } from "./tasks.js";
 
 const Name = z.string().trim().min(1).max(120);
 export const RegistryInput = z.object({ name: Name });
@@ -92,23 +94,31 @@ export class MlModelService {
         JOIN ml_artifacts a ON a.tenant_id=m.tenant_id AND a.id=m.artifact_id
         WHERE e.tenant_id=$1 AND e.id=$2 AND e.status='ACTIVE' AND m.status='READY' FOR SHARE OF e,m`, [principal.tenantId, endpointId]);
       if (!selected.rowCount) throw new NotFoundError("Active endpoint with READY model not found"); const model = selected.rows[0];
-      const snapshot = TrainingSnapshot.parse(model.snapshot); const rows = validateRows(snapshot.dataset.schema, raw, true);
-      if (rows.length > 1000) throw new ConflictError("Prediction batch exceeds 1000 rows");
+      // The task comes from the catalog only (B1). It decides whether rows carry the target (forecasting history) and the
+      // row cap, which is checked before any cell is decoded.
+      const snapshot = TrainingSnapshot.parse(model.snapshot), definition = getModel(snapshot.backend, snapshot.algorithm), task = TASKS[definition.taskType];
+      const columns = snapshot.dataset.schema.columns.filter(c => task.predictionIncludesTarget || c.name !== snapshot.dataset.schema.target);
+      const limit = maxPredictionRows(definition.taskType, columns.map(c => c.type));
+      if (Array.isArray(raw) && raw.length > limit) throw new ConflictError(`Prediction batch exceeds ${limit} rows`);
+      const rows = validateRows(snapshot.dataset.schema, raw, true, task.predictionIncludesTarget);
       const backend = this.backends.get(snapshot.backend); if (!backend) throw new ConflictError("Inference backend is not configured");
       const p = await c.query("INSERT INTO ml_predictions(tenant_id,endpoint_id,model_version_id,input_hash,count) VALUES($1,$2,$3,$4,$5) RETURNING *", [principal.tenantId, endpointId, model.model_version_id, canonicalJsonHash(rows), rows.length]);
-      return { record: p.rows[0], model, snapshot, rows, backend };
+      return { record: p.rows[0], model, snapshot, rows, backend, definition };
     });
     const started = Date.now(); let output: unknown[] | null = null; let failure: { code: string; category: string; message: string } | null = null;
     try {
       if (!pending.backend.capabilities.artifactFormats.includes(pending.model.format)) throw new MlBackendFailure("incompatible_artifact", "Unsupported artifact format");
       const bytes = await this.artifacts.get(principal.tenantId, pending.model.content);
       output = await pending.backend.predict(pending.snapshot, bytes, pending.rows, pending.model.environment, signal);
-      if (output.length !== pending.rows.length) throw new MlBackendFailure("invalid_response", "Prediction count mismatch");
-      z.array(z.json()).parse(output);
+      output = validatePredictions(pending.definition.taskType, output, predictionCount(pending.definition, pending.snapshot, pending.rows.length), pending.model.environment);
     } catch (error) { output = null; failure = { code: "ml_prediction_failed", category: error instanceof z.ZodError ? "invalid_response" : failureCategory(error, "prediction_failed"), message: "Inference failed; inspect worker environment and artifact integrity" }; }
     return transaction(this.pool, async c => {
-      const p = await c.query("UPDATE ml_predictions SET status=$1,latency_ms=$2,output=$3,failure=$4 WHERE tenant_id=$5 AND id=$6 AND status='PENDING' RETURNING *", [failure ? "FAILED" : "COMPLETED", Date.now() - started, output ? JSON.stringify(output) : null, failure ? JSON.stringify(failure) : null, principal.tenantId, pending.record.id]);
-      await audit(c, principal.tenantId, principal.userId, "ml.prediction_recorded", { predictionId: pending.record.id, status: p.rows[0].status, endpointId }); return p.rows[0];
+      // Embedding vectors are returned once and never stored (E2): the record keeps their digest and shape.
+      const embedding = pending.definition.taskType === "embedding" && output !== null;
+      const stored = embedding ? { digest: canonicalJsonHash(output), shape: [pending.rows.length, embeddingDimension(pending.model.environment)] } : output;
+      const p = await c.query("UPDATE ml_predictions SET status=$1,latency_ms=$2,output=$3,failure=$4 WHERE tenant_id=$5 AND id=$6 AND status='PENDING' RETURNING *", [failure ? "FAILED" : "COMPLETED", Date.now() - started, stored ? JSON.stringify(stored) : null, failure ? JSON.stringify(failure) : null, principal.tenantId, pending.record.id]);
+      await audit(c, principal.tenantId, principal.userId, "ml.prediction_recorded", { predictionId: pending.record.id, status: p.rows[0].status, endpointId });
+      return embedding ? { ...p.rows[0], vectors: output } : p.rows[0];
     });
   }
   async compare(principal: Principal, baselineId: string, candidateId: string) {

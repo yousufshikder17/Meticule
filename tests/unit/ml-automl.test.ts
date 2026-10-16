@@ -6,6 +6,12 @@ const mixed = { columns: [{ name: "a", type: "number" as const }, { name: "kind"
 const input = (extra: Record<string, unknown> = {}) => AutoMlInput.parse({ name: "auto", datasetVersionId: "11111111-1111-4111-8111-111111111111", target: "label", taskType: "classification", metric: "f1", seed: 1, ...extra });
 
 describe("AutoML V1 planning", () => {
+  it("ignores non-tabular features and refuses missing targets or no remaining features", () => {
+    expect(planAutoMl(input(), { ...numeric, columns: [...numeric.columns, { name: "at", type: "timestamp" }, { name: "note", type: "text" }] }, 200)).toEqual(planAutoMl(input(), numeric, 200));
+    expect(() => planAutoMl(input(), { columns: numeric.columns }, 200)).toThrow(/requires a dataset target/);
+    expect(() => planAutoMl(input(), { target: "label", columns: [{ name: "at", type: "timestamp" }, { name: "label", type: "string" }] }, 200)).toThrow(/no feature columns/);
+    expect(() => planAutoMl(input({ metric: "mean_pairwise_cosine" }), numeric, 200)).toThrow(/diagnostic/);
+  });
   it("is deterministic and covers the default classification neighbourhood", () => {
     const plan = planAutoMl(input(), numeric, 200);
     expect(planAutoMl(input(), numeric, 200)).toEqual(plan);
