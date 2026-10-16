@@ -372,9 +372,11 @@ change.
 | Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) | `ML_AUDIO_PYTHON` (the scikit-learn venv) | `ML_FORECASTING_PYTHON` (the scikit-learn venv) |
 | Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` | `tests/conformance/transformers-*.test.ts` (task suite) | `tests/conformance/audio-*.test.ts` (task suite) | `tests/conformance/forecasting-*.test.ts` (task suite) |
 
-Known CI limit. The test job provides scikit-learn and PyTorch. The TensorFlow job provides only TensorFlow, and it runs the
-TensorFlow conformance file. The pairs involving TensorFlow in `cross-backend.test.ts` therefore run locally when all three
-interpreters are configured, not in hosted CI. Similarly, `tests/integration/ml-matrix.test.ts` (the Phase 3E matrix) needs all three
+Known CI limit. The test job provides scikit-learn and PyTorch (whose venv also serves audio and forecasting). The TensorFlow,
+JAX and Transformers jobs each provide only their own framework and run only their own files. `cross-backend.test.ts` runs
+in the test job (scikit-learn with PyTorch, audio and forecasting) and in the gbdt job (scikit-learn with XGBoost, LightGBM
+and forecasting). The pairs involving TensorFlow, JAX or Transformers therefore run locally when their interpreters are
+configured, not in hosted CI. Similarly, `tests/integration/ml-matrix.test.ts` (the Phase 3E matrix) needs all three
 interpreters and is not run by either CI job. Closing this needs one venv that hosts all three frameworks, which is a CI design
 change and is not made in this phase.
 

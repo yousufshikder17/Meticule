@@ -1,14 +1,17 @@
-# Machine learning: classical and neural (V1 lifecycle, Phase 2 and Phase 3)
+# Machine learning (V1 lifecycle, Phases 2 to 4)
 
-Meticule's optional ML subsystem is a self-hosted platform for tabular machine learning. You can:
+Meticule's optional ML subsystem is a self-hosted machine-learning platform for tabular, time-series, text, image and audio data. You can:
 
 - ingest versioned datasets and configure preprocessing;
-- train classical (scikit-learn) and neural (PyTorch, TensorFlow/Keras) models;
+- train classical (scikit-learn), neural (PyTorch, TensorFlow/Keras, JAX) and gradient-boosted (XGBoost, LightGBM) models;
+- serve and fine-tune heads on operator-provisioned Hugging Face Transformers models for text, images and speech;
+- forecast time series, detect anomalies and compute MFCC audio features;
+- build tenant-isolated pgvector embedding indexes and run exact similarity search;
 - run cross-validation, benchmarks, bounded hyperparameter search and AutoML;
 - resume interrupted neural training from durable checkpoints;
 - register and promote model versions, and serve version-pinned inference.
 
-Phase 2 (model catalog, cross-validation, benchmarks, hyperparameter search, bounded AutoML, ranking, richer preprocessing and metrics, explicit artifact compatibility) is described in [Phase 2](#phase-2-models-cross-validation-and-experiments). [Phase 3](#phase-3-neural-networks-durable-training-and-devices) adds neural backends, durable checkpointed training, explicit CPU/CUDA devices and mixed precision, all behind [Meticule ML Backend Contract v1](ml-backend-contract.md). Each phase extends the V1 lifecycle below; nothing was replaced.
+Phase 2 (model catalog, cross-validation, benchmarks, hyperparameter search, bounded AutoML, ranking, richer preprocessing and metrics, explicit artifact compatibility) is described in [Phase 2](#phase-2-models-cross-validation-and-experiments). [Phase 3](#phase-3-neural-networks-durable-training-and-devices) adds neural backends, durable checkpointed training, explicit CPU/CUDA devices and mixed precision, all behind [Meticule ML Backend Contract v1](ml-backend-contract.md). [Phase 4](#phase-4-more-frameworks-modalities-and-retrieval) adds contract v2, five more backends, new tasks and modalities, and embedding retrieval. Each phase extends the V1 lifecycle below; nothing was replaced.
 
 ML extends Meticule's existing PostgreSQL run queue through `kind='ml'`. The agent executor, JWT authentication, tenant transactions and existing RLS boundary remain authoritative. Backend adapters compute; they never schedule work or change lifecycle state.
 
@@ -39,6 +42,8 @@ Publication and failure handling both check the current immutable attempt ID und
 ## Migration compatibility
 
 Migration `006_ml_durable_training` (Phase 3) is additive. It adds nullable attempt columns (`resumed_from_epoch`, `best_epoch`, `stop_reason`) and the append-only `ml_training_epochs` and `ml_training_checkpoints` tables, with tenant RLS. Existing Phase 2 rows, artifacts and endpoints are unchanged and keep working after the upgrade.
+
+Migration `007_ml_embeddings` (Phase 4) is additive too. It adds `ml_embedding_indexes` and `ml_embedding_vectors` on the existing `vector` extension, with the same tenant RLS policy, lifecycle triggers and append-only vectors. No existing table, row or artifact changes; Phase 1-3 models, endpoints and checkpoints keep serving and resuming after the upgrade.
 
 Apply normal migrations before starting upgraded API/workers, and restart older workers before enabling ML. The uncommitted `002_ml.sql` precursor was never part of the released public migration chain. If it was manually applied locally, V1 migration fails explicitly rather than overwriting its incompatible tables or discarding data. Export that experimental data and migrate a fresh database; no automatic destructive conversion is performed.
 
@@ -257,10 +262,124 @@ For CUDA, install a CUDA build of the same PyTorch version instead of the CPU wh
 
 ### Phase 3 limits
 
-- Neural models are bounded feed-forward networks for tabular data. Text, image, audio and time-series models are not supported.
+- Phase 3 neural models are bounded feed-forward networks for tabular data. Text, image, audio and time-series models come from the separate Phase 4 backends.
 - There is no distributed or multi-GPU training, GPU scheduling or managed serving.
 - Real CUDA execution is not exercised in CI.
 - A neural chunk runs in a fresh runner process, which costs interpreter start-up time per chunk.
+
+## Phase 4: more frameworks, modalities and retrieval
+
+Phase 4 adds backend contract v2, five optional backends, anomaly detection in the scikit-learn backend, and embedding indexes. Every backend runs through the same durable lifecycle, PostgreSQL blob storage, registry, version-pinned endpoints and authorization as Phases 1-3. Section 13 and section 19 of the [backend contract](ml-backend-contract.md) are the reference.
+
+### Contract v2 and compatibility
+
+A snapshot uses contract v2 when it needs something v1 cannot express: a task other than classification or regression, a `text`, `timestamp`, `image` or `audio` column, a chronological split, or a dataset without a target. Everything else stays v1, so Phase 1-3 requests keep their meaning and their artifacts keep loading. A model's task comes from the catalog, never from the request. The changes Phase 3 callers can see are listed in contract section 19.9, mainly the new `GET /ml/models` metric shape and per-task prediction row caps.
+
+New column types:
+
+- `text` (at most 10,000 characters);
+- `timestamp` (ISO 8601 with an explicit offset, years 1900-2199);
+- `image` (base64 PNG or JPEG);
+- `audio` (base64 PCM or float WAV, 1-2 channels, 8-48 kHz, 0.1-30 s).
+
+TypeScript (`src/ml/media.ts`) and Python (`ml/media_common.py`) validate media headers with the same rules, checked against shared test vectors. Each base64 cell decodes to at most 2 MiB. Each request is also capped in total pixels and audio seconds. The 8 MB `/ml` request body limit still applies, and it is usually what bounds a media dataset at ingest.
+
+New tasks:
+
+- `forecasting` (chronological split only);
+- `anomaly_detection` (unsupervised, optional boolean label);
+- `embedding`;
+- `transcription` (speech to text, with the reference transcript as target).
+
+New metrics include forecasting errors, anomaly scores, `wer`, `cer` and embedding diagnostics. Diagnostic metrics cannot rank experiments.
+
+### Backends
+
+| Backend (flag) | Models | Tasks | Inputs | Artifact / checkpoint |
+| --- | --- | --- | --- | --- |
+| scikit-learn (`ML_ENABLED`) | Phase 2 catalog plus `isolation_forest`, `local_outlier_factor`, `robust_covariance` | classification, regression, anomaly detection | tabular | `sklearn-pickle-v1` (anomaly: artifact schema 2) |
+| JAX (`ML_JAX_ENABLED`) | `mlp_classifier`, `mlp_regressor` | classification, regression | tabular | `jax-params-v1` / `jax-checkpoint-v1` (durable chunks) |
+| XGBoost (`ML_XGBOOST_ENABLED`) | `xgboost_classifier`, `xgboost_regressor` | classification, regression | tabular; missing numbers as NaN | `xgboost-json-v1` |
+| LightGBM (`ML_LIGHTGBM_ENABLED`) | `lightgbm_classifier`, `lightgbm_regressor`, `lightgbm_forecaster` | classification, regression, forecasting | tabular; timestamp for the forecaster | `lightgbm-text-v1` |
+| Transformers (`ML_TRANSFORMERS_ENABLED`) | `text_classifier`, `text_embedder`, `text_embedding_classifier`, `image_classifier`, `image_embedder`, `image_embedding_classifier`, `audio_classifier`, `speech_recognizer` | classification, embedding, transcription | exactly one text, image or audio column | `transformers-reference-v1` |
+| Audio (`ML_AUDIO_ENABLED`) | `audio_features`, `audio_mfcc_classifier` | embedding, classification | exactly one audio column | `audio-npz-v1` |
+| Forecasting (`ML_FORECASTING_ENABLED`) | `seasonal_naive_forecaster`, `ridge_forecaster` | forecasting | the split's timestamp column | `forecast-npz-v1` |
+
+Every Phase 4 backend runs on CPU in fp32 only.
+
+- **JAX.** Native JAX code (`jax.value_and_grad`, `jit`, explicit PRNG keys, hand-written SGD/Adam/AdamW), not a wrapper around another framework. It uses Phase 3's durable checkpointed training, early stopping and resume. Requesting `cuda` fails as `device_unavailable`.
+- **XGBoost and LightGBM.** Native training APIs, not scikit-learn wrappers. Each attempt trains once. Early stopping is the framework's own and is monitored only on the validation partition; Meticule's epoch-based training policy and checkpoints are refused. Each model is stored as the framework's JSON or text inside a JSON envelope, never a pickle.
+- **Transformers.** Six models serve pretrained classifiers, embedders and a greedy-CTC wav2vec2 speech recognizer. Two train a softmax head over a frozen encoder. There is no fine-tuning of the encoder, no PEFT/LoRA and no beam search or language model. A transcription request takes at most 8 clips of at most 30 s.
+- **Audio.** MFCC summary vectors computed with NumPy and SciPy. `audio_features` serves them as embeddings; `audio_mfcc_classifier` trains a softmax head on them.
+- **Forecasting.** One univariate series per dataset: a timestamp feature and a numeric target, with no covariates. Forecasts are recursive multi-step over `horizon`, and evaluation is rolling-origin. Prediction rows are recent history and include the target; the response is `horizon` items of `{step, timestamp, value}`.
+- **Anomaly detection.** Unsupervised. Higher scores are more anomalous, and a numeric contamination (default 0.1) sets the threshold. A boolean label column is used only by score metrics, never for fitting.
+
+Anything a backend does not declare (another task, column type, device, precision or preprocessing step) is refused with a typed category before training starts. A backend never falls back to another one.
+
+### Transformers models are provisioned offline
+
+The platform never downloads a model. An operator places each model in its own directory under `ML_TRANSFORMERS_MODEL_ROOT` (an absolute path) and writes a `meticule-model.json` manifest with `ml/transformers_manifest.py`. The manifest records the model's name, kind, family, source repository and revision, license, and a SHA-256 for every file.
+
+On every command the runner checks the directory against the manifest:
+
+- Only safetensors weights, configs, tokenizers and processors are allowed. Code, pickled weights, shard indexes, symlinks and junctions are not.
+- The directory is copied into a private temporary directory while it is hashed, and only that copy is loaded.
+- Loading uses `local_files_only`, `trust_remote_code=False` and forced offline mode.
+- Encoders are limited to 400 million fp32 parameters.
+
+The model root is shared by every tenant on the installation. The model's own license governs its use and redistribution, and the platform does not check it. No model weights ship with Meticule.
+
+A Transformers artifact records the model's name and verified digest, plus any trained head. It never contains base weights, so it fits the 16 MB blob cap for ordinary heads. The model directory must stay provisioned to serve the model: if it changes, prediction fails as `pretrained_model_mismatch`.
+
+### Embedding indexes and similarity
+
+An embedding prediction returns its vectors once and stores only `{digest, shape}`. Persistent search is a separate, explicit step:
+
+1. **Create** an index (`tenant_admin`). It needs an active endpoint whose READY model performs `embedding`, and a dataset version of at most 5,000 rows with that model's feature columns.
+2. **Build** it (`tenant_admin`) in steps of at most 256 rows. A concurrent build gets 409. The index becomes READY when every row has a vector, or FAILED on a wrong-dimension, non-finite or (under cosine) zero vector.
+3. **Search** it (any authenticated tenant member): at most 16 query rows, `k` up to 100. Search is exact (no approximate index), with `cosine`, `dot` or `euclidean`. Results are `{rowIndex, score, payload}` with up to 16 payload columns.
+
+Pairwise similarity (any tenant member) embeds at most 64 x 64 rows through an endpoint and scores them without storing anything.
+
+Vectors live in PostgreSQL with pgvector, under the same tenant RLS as the other ML tables; there is no separate vector database. Database triggers keep vectors append-only and allow only the BUILDING → READY | FAILED transition.
+
+### Storage limits in the public edition
+
+Every dataset, artifact and checkpoint is one tenant-scoped PostgreSQL blob of at most 16 MB. Phase 4 artifacts are small by design:
+
+- network weights for small MLPs;
+- boosted-tree text;
+- MFCC or linear heads;
+- Transformers references.
+
+A larger artifact fails as `output_limit_exceeded`, with a message naming the limit. Nothing is truncated or stored elsewhere. Transformers base weights never pass through blob storage.
+
+### Enable the Phase 4 backends
+
+Each backend needs `ML_ENABLED=true`, its own flag and an interpreter with its requirements file. All of them are optional and off by default. Audio and forecasting need only `ml/requirements.txt`, so they can share the scikit-learn interpreter.
+
+```powershell
+python -m venv .tmp/jax-venv;  .tmp/jax-venv/Scripts/python.exe -m pip install -r ml/requirements-jax.txt
+python -m venv .tmp/gbdt-venv; .tmp/gbdt-venv/Scripts/python.exe -m pip install -r ml/requirements-gbdt.txt
+python -m venv .tmp/hf-venv
+.tmp/hf-venv/Scripts/python.exe -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.9.1"
+.tmp/hf-venv/Scripts/python.exe -m pip install -r ml/requirements-transformers.txt
+$env:ML_JAX_ENABLED='true';          $env:ML_JAX_PYTHON=(Resolve-Path .tmp/jax-venv/Scripts/python.exe).Path
+$env:ML_XGBOOST_ENABLED='true';      $env:ML_XGBOOST_PYTHON=(Resolve-Path .tmp/gbdt-venv/Scripts/python.exe).Path
+$env:ML_LIGHTGBM_ENABLED='true';     $env:ML_LIGHTGBM_PYTHON=$env:ML_XGBOOST_PYTHON
+$env:ML_TRANSFORMERS_ENABLED='true'; $env:ML_TRANSFORMERS_PYTHON=(Resolve-Path .tmp/hf-venv/Scripts/python.exe).Path
+$env:ML_TRANSFORMERS_MODEL_ROOT='D:\meticule-models'   # absolute; operator-provisioned
+$env:ML_AUDIO_ENABLED='true';        $env:ML_AUDIO_PYTHON=$env:ML_PYTHON
+$env:ML_FORECASTING_ENABLED='true';  $env:ML_FORECASTING_PYTHON=$env:ML_PYTHON
+```
+
+Set the same variables for the API and the worker. Startup fails if `ML_TRANSFORMERS_ENABLED` is true and the model root is not an existing absolute directory. A disabled backend's models appear in `GET /ml/models` with `available: false`, and training or serving them fails with a clear refusal. The runners are found under `ml/` relative to the working directory, so start the API and worker from the repository or package root. The Node-only Docker image does not include Python. Containerized ML needs an operator-built image or sidecar with these interpreters.
+
+### Phase 4 limits
+
+- CPU and fp32 only. No GPU path was added, and none is claimed.
+- Tests use tiny random Transformers models generated offline. They prove the execution path, not model quality. Accuracy of real BERT, ViT or wav2vec2 checkpoints is not measured.
+- There is no encoder fine-tuning, PEFT/LoRA, beam search, multivariate or covariate forecasting, or approximate vector index.
 
 ## Public API
 
@@ -292,8 +411,13 @@ All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are
 | GET | `/ml/benchmarks/:id`, `/ml/searches/:id`, `/ml/automl/:id` | Candidates, lineage, ranking, recommendation (404 for another kind) |
 | GET | `/ml/experiments/:id/ranking` | Ranking and finality |
 | POST | `/ml/experiments/:id/cancel` | Cancel unfinished candidates (`tenant_admin`) |
+| GET/POST | `/ml/embedding-indexes` | List / create an index `{name,endpointId,datasetVersionId,metric?,payloadColumns?}` (`tenant_admin`) |
+| GET | `/ml/embedding-indexes/:id` | Index status and vectors built |
+| POST | `/ml/embedding-indexes/:id/build` | Embed the next at most 256 rows (`tenant_admin`); 409 while another build runs, 422 when it fails |
+| POST | `/ml/embedding-indexes/:id/search` | `{rows,k?}`: exact nearest rows for at most 16 queries |
+| POST | `/ml/endpoints/:id/similarity` | `{left,right,metric?}`: at most 64 x 64 pairwise scores through an embedding endpoint |
 
-Prediction batches are capped at 1,000 and must follow the original dataset schema with its target omitted. Malformed schema definitions return 400, incompatible data/inference rows 409, backend inference failures 422 with a durable FAILED record, and management-role failures 403. Retiring a version disables its endpoints atomically.
+Prediction batches must follow the original dataset schema with its target omitted (forecasting history rows include it). The row cap depends on the task: 1,000 for classification, regression and anomaly detection, 5,000 history rows for forecasting, 256 for embeddings, 8 for transcription, and lower with media: 32 rows with an image column, 16 with audio, 64 for text embeddings. It is checked before any cell is decoded. Malformed schema definitions return 400, incompatible data/inference rows 409, backend inference failures 422 with a durable FAILED record, and management-role failures 403. Retiring a version disables its endpoints atomically.
 
 Monitoring includes disabled endpoints and uses persisted prediction outcomes. Error rate excludes pending requests; latency includes completed and failed requests. Empty windows return null rates/latencies. This operational summary complements reproducible training regression comparisons; it does not measure live model accuracy or data drift without labels or input-distribution observations.
 
@@ -333,16 +457,16 @@ $env:ML_TEST_PYTHON=(Resolve-Path .tmp/ml-venv/Scripts/python.exe).Path
 npm run test:integration
 ```
 
-Real backend checks run when `ML_TEST_PYTHON` is set, and for the neural backends when `ML_TEST_PYTORCH_PYTHON` and `ML_TEST_TENSORFLOW_PYTHON` are set. The backend conformance suite in `tests/conformance` runs each configured backend against the contract, including every preprocessing operation and score type it declares. `tests/integration/ml-matrix.test.ts` compares all three frameworks on identical splits and folds; normal unit tests need no Python. The GitHub Actions workflow installs Python 3.13 and the pinned `ml/requirements.txt` and always sets it, and a CI-only test fails the job if it is missing, so the real runner is exercised on every push and pull request (a local run without the variable skips those tests). Tests cover PostgreSQL storage, JWT/RLS, attempts, cancellation/recovery, stale workers, atomic publication, all fifteen models, preprocessing, K-fold and stratified K-fold, fold-local fitting and leakage, reproducibility, benchmark/search/AutoML planning and execution, ranking direction and tie-breaks, partial failure, concurrency, artifact compatibility with a real V1 artifact, registry/version pins, inference schema errors, failed predictions, comparison, public authorization and tenant isolation, and migration safety. Existing integration tests are rerun to check agent behavior.
+Real backend checks run when `ML_TEST_PYTHON` is set, and for the other backends when their variables are set: `ML_TEST_PYTORCH_PYTHON`, `ML_TEST_TENSORFLOW_PYTHON`, `ML_TEST_JAX_PYTHON`, `ML_TEST_XGBOOST_PYTHON` and `ML_TEST_LIGHTGBM_PYTHON` (one gbdt venv serves both), `ML_TEST_TRANSFORMERS_PYTHON`, and `ML_TEST_AUDIO_PYTHON` (the scikit-learn venv). Transformers tests generate tiny models offline with `tests/python/hf_fixtures.py`; no test downloads anything. Run the heavyweight framework files one process at a time on a machine with limited memory. CI runs separate jobs for TensorFlow, JAX, XGBoost/LightGBM and Transformers. The cross-backend pairs that need TensorFlow, JAX or Transformers together with another framework run only locally. The backend conformance suite in `tests/conformance` runs each configured backend against the contract, including every preprocessing operation and score type it declares. `tests/integration/ml-matrix.test.ts` compares all three frameworks on identical splits and folds; normal unit tests need no Python. The GitHub Actions workflow installs Python 3.13 and the pinned `ml/requirements.txt` and always sets it, and a CI-only test fails the job if it is missing, so the real runner is exercised on every push and pull request (a local run without the variable skips those tests). Tests cover PostgreSQL storage, JWT/RLS, attempts, cancellation/recovery, stale workers, atomic publication, all fifteen models, preprocessing, K-fold and stratified K-fold, fold-local fitting and leakage, reproducibility, benchmark/search/AutoML planning and execution, ranking direction and tie-breaks, partial failure, concurrency, artifact compatibility with a real V1 artifact, registry/version pins, inference schema errors, failed predictions, comparison, public authorization and tenant isolation, and migration safety. Existing integration tests are rerun to check agent behavior.
 
 ## Deferred scope
 
 Deferred:
 
-- other framework adapters, including XGBoost and LightGBM;
-- non-tabular data (text, images, audio, time series) and richer data formats;
+- further framework adapters, ONNX export and a plugin SDK;
+- encoder fine-tuning and PEFT/LoRA, multivariate forecasting, approximate vector indexes and model downloads;
 - streaming or large artifacts beyond the 16 MB blob cap, and signed artifacts;
-- high-throughput serving and GPU scheduling;
+- high-throughput serving, GPU execution for the Phase 4 backends, and GPU scheduling;
 - repeated CV, and Bayesian or multi-stage AutoML;
 - distributed or remote training, fine-tuning and drift monitoring.
 

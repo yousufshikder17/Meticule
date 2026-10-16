@@ -48,16 +48,17 @@ $env:OLLAMA_EMBEDDING_DIMENSIONS='384'
 npm run verify:rag
 ```
 
-## Optional machine learning (classical and neural)
+## Optional machine learning
 
-Meticule includes an optional, self-hosted ML platform for tabular data. Its lifecycle covers:
+Meticule includes an optional, self-hosted ML platform for tabular, time-series, text, image and audio data. Its lifecycle covers:
 
 - versioned datasets and preprocessing pipelines;
 - durable training and evaluation with cross-validation;
 - benchmarks, bounded hyperparameter search and AutoML;
-- explicit model registration, promotion and rollback, and version-pinned inference.
+- explicit model registration, promotion and rollback, and version-pinned inference;
+- tenant-isolated pgvector embedding indexes with exact similarity search.
 
-Classical models run on scikit-learn. Neural networks run on PyTorch (CPU, or CUDA when explicitly requested, with optional mixed precision) and TensorFlow/Keras (CPU). Neural training runs in durable, checkpointed chunks that resume after a worker is lost. Everything reuses the leased run queue, tenant isolation and PostgreSQL-backed artifact storage. Each framework runs in its own isolated Python environment behind a versioned internal backend contract with a conformance suite.
+Classical models run on scikit-learn. Neural networks run on PyTorch (CPU, or CUDA when explicitly requested, with optional mixed precision) TensorFlow/Keras (CPU) and native JAX (CPU). Gradient boosting runs on native XGBoost and LightGBM. Operator-provisioned Hugging Face Transformers models serve text, image and audio classification, embeddings and speech recognition offline, with no downloads and no remote code. NumPy/SciPy audio features, univariate forecasting and anomaly detection complete the set. Neural training runs in durable, checkpointed chunks that resume after a worker is lost. Everything reuses the leased run queue, tenant isolation and PostgreSQL-backed artifact storage. Each framework runs in its own isolated Python environment behind a versioned internal backend contract with a conformance suite.
 
 ML is disabled by default; see [ML setup and APIs](docs/ml.md) and the [backend contract](docs/ml-backend-contract.md).
 

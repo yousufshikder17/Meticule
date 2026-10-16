@@ -170,7 +170,7 @@ jobs:
           echo "ML_TEST_PYTHON=$RUNNER_TEMP/gbdt-venv/bin/python" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm run db:migrate
-      - run: npx vitest run tests/unit/ml-gbdt.test.ts tests/unit/ml-gbdt-runner.test.ts tests/integration/ml-gbdt.test.ts tests/conformance/xgboost.test.ts tests/conformance/lightgbm.test.ts tests/conformance/lightgbm-forecaster.test.ts tests/integration/ml-forecasting.test.ts
+      - run: npx vitest run tests/unit/ml-gbdt.test.ts tests/unit/ml-gbdt-runner.test.ts tests/integration/ml-gbdt.test.ts tests/conformance/xgboost.test.ts tests/conformance/lightgbm.test.ts tests/conformance/lightgbm-forecaster.test.ts tests/integration/ml-forecasting.test.ts tests/conformance/cross-backend.test.ts
         env:
           CI: "true"
 

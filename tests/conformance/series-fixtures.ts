@@ -14,7 +14,7 @@ export function forecastTarget(backend: "forecasting" | "lightgbm", algorithm: s
   const python = backend === "forecasting" ? sklearnPython : gbdtPython;
   const create = (timeoutMs?: number): MlBackend => (backend === "forecasting" ? new ForecastingBackend(python, timeoutMs) : new LightgbmBackend(python, timeoutMs));
   return {
-    id: backend, create, python, script: resolve(`ml/${backend === "forecasting" ? "forecasting" : "lightgbm"}_backend.py`), algorithm, hyperparameters,
+    id: backend, create, python, script: resolve(`ml/${backend === "forecasting" ? "forecasting" : "lightgbm"}_runner.py`), algorithm, hyperparameters,
     columns: [{ name: "at", type: "timestamp" }, { name: "y", type: "number" }], feature: "at", target: "y", rows: SERIES_ROWS, metrics: ["mae", "rmse", "smape", "mase"],
     split: CHRONOLOGICAL, predictRows: SERIES_ROWS.slice(-30), requiredInCi: backend === "forecasting" ? process.env.CI === "true" : process.env.ML_GBDT_JOB === "true",
   };
