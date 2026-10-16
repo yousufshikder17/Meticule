@@ -1,9 +1,15 @@
 """LightGBM CPU backend over the Meticule runner protocol: native lgb.train on a Dataset, the booster's own text model format.
 
+`lightgbm_forecaster` (task forecasting) fits a LightGBM regressor on forecasting_common's lag and rolling-mean features of the
+training block and forecasts recursively; the series rules, leakage policy and evaluation are forecasting_common's.
+
 Everything the two gradient-boosting runners share (bounds, targets, early stopping, the artifact envelope, evaluation) is
 in gbdt_common. One fit per attempt; framework-native early stopping only, never Meticule's training policy.
-pandas is a runtime key from this milestone on: the forecasting model added later builds its features with it.
+pandas is a runtime key: lightgbm_forecaster builds its features with it.
 """
+import base64
+import binascii
+import json
 import sys
 
 import joblib
@@ -14,6 +20,7 @@ import scipy
 import sklearn
 import threadpoolctl
 
+import forecasting_common
 import gbdt_common
 import ml_runtime_common as common
 import neural_common
@@ -27,7 +34,7 @@ PARAMETERS = {"max_depth": ("int_nullable", 1, 32, None), "num_leaves": ("int", 
 
 
 def environment():
-    return common.base_environment([__file__, common.__file__, neural_common.__file__, gbdt_common.__file__], BACKEND, ARTIFACT_FORMAT,
+    return common.base_environment([__file__, common.__file__, neural_common.__file__, gbdt_common.__file__, forecasting_common.__file__], BACKEND, ARTIFACT_FORMAT,
                                    gbdt_common.ARTIFACT_SCHEMA, PROTOCOL,
                                    {"lightgbm": lgb.__version__, "pandas": pandas.__version__, "numpy": np.__version__, "scipy": scipy.__version__,
                                     "sklearn": sklearn.__version__, "joblib": joblib.__version__, "threadpoolctl": threadpoolctl.__version__})
@@ -69,8 +76,70 @@ def load(text):
 
 
 RUNNER = gbdt_common.Runner(BACKEND, ARTIFACT_FORMAT, PROTOCOL, RUNTIME_KEYS, PARAMETERS, environment, fit, raw_predict, dump, load)
-MODELS = gbdt_common.MODELS[BACKEND]
-execute = gbdt_common.make_execute(RUNNER)
+FORECASTER = "lightgbm_forecaster"
+MODELS = {**gbdt_common.MODELS[BACKEND], FORECASTER: "forecasting"}
+TREE_PARAMETERS = tuple(name for name in RUNNER.parameters if name != "early_stopping_rounds")
+
+
+class ForecastAdapter:
+    """lightgbm_forecaster for forecasting_common: the same tree parameters (no native early stopping: the validation block
+    belongs to evaluation), and the booster's text model in the same JSON envelope with forecasting metadata."""
+    contract = RUNNER.contract
+    environment = staticmethod(environment)
+
+    @staticmethod
+    def model_parameters(spec):
+        return {}
+
+    @staticmethod
+    def settings(spec):
+        supplied = spec.get("hyperparameters") or {}
+        settings = forecasting_common.resolve_settings(supplied, "features", TREE_PARAMETERS)
+        tree = gbdt_common.resolve_hyperparameters(RUNNER, {"hyperparameters": {k: v for k, v in supplied.items() if k in TREE_PARAMETERS}})
+        tree.pop("early_stopping_rounds")
+        settings["tree"] = tree
+        return settings
+
+    @staticmethod
+    def fit(settings, matrix, values, seed):
+        booster, _ = fit("regression", {**settings["tree"], "early_stopping_rounds": 0}, matrix, values, None, None, seed)
+        return {"booster": booster, "predict": booster.predict}
+
+    @staticmethod
+    def serialize(metadata, model):
+        envelope = {"metadata": {**metadata, "backend": BACKEND}, "model": model["booster"].model_to_string()}
+        return base64.b64encode(json.dumps(envelope, allow_nan=False).encode("utf-8")).decode()
+
+    @staticmethod
+    def load(artifact, env):
+        try:
+            raw = base64.b64decode(artifact, validate=True)
+            if len(raw) > gbdt_common.MAX_ARTIFACT_BYTES:
+                raise ValueError
+            envelope = json.loads(raw.decode("utf-8"))
+            if not isinstance(envelope, dict) or set(envelope) != {"metadata", "model"} or not isinstance(envelope["metadata"], dict) or not isinstance(envelope["model"], str):
+                raise ValueError
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            raise common.IncompatibleArtifact("unreadable artifact") from None
+        metadata = envelope["metadata"]
+        common.check_compatible(metadata.get("environment"), env, RUNNER.contract)
+        if metadata.get("backend") != BACKEND or metadata.get("task") != "forecasting" or metadata.get("algorithm") != FORECASTER or not isinstance(metadata.get("settings"), dict):
+            raise common.IncompatibleArtifact("malformed artifact metadata")
+        try:
+            booster = load(envelope["model"])
+        except Exception:
+            raise common.IncompatibleArtifact("unreadable model") from None
+        return metadata, {"booster": booster, "predict": booster.predict}
+
+
+_forecast = forecasting_common.make_execute(ForecastAdapter)
+_boosting = gbdt_common.make_execute(RUNNER)
+
+
+def execute(request):
+    snapshot = request.get("snapshot") or {}
+    return _forecast(request) if snapshot.get("algorithm") == FORECASTER else _boosting(request)
+
 
 if __name__ == "__main__":
     sys.exit(common.serve(execute, task_of=MODELS.get))

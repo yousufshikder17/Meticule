@@ -357,20 +357,20 @@ change.
 
 ## 13. Current implementations
 
-| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM | Transformers | Audio |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` | `TransformersBackend` | `AudioBackend` |
-| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` | `transformers-reference-v1` | `audio-npz-v1` |
-| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) | none (one-shot) | none (one-shot) |
-| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` |
-| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` |
-| Iterative | no | yes | yes | yes | no | no | no | no |
-| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `embedding` | `embedding`, `classification` |
-| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `text`, `image` (exactly one) | `audio` (exactly one) |
-| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v2 (its snapshots always use non-tabular columns) | v2 |
-| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN | none | none |
-| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) | `ML_AUDIO_PYTHON` (the scikit-learn venv) |
-| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` | `tests/conformance/transformers-*.test.ts` (task suite) | `tests/conformance/audio-*.test.ts` (task suite) |
+| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM | Transformers | Audio | Forecasting |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` | `TransformersBackend` | `AudioBackend` | `ForecastingBackend` |
+| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` | `transformers-reference-v1` | `audio-npz-v1` | `forecast-npz-v1` |
+| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) | none (one-shot) | none (one-shot) | none (one-shot) |
+| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` |
+| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` |
+| Iterative | no | yes | yes | yes | no | no | no | no | no |
+| Tasks | `classification`, `regression`, `anomaly_detection` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression`, `forecasting` | `classification`, `embedding` | `embedding`, `classification` | `forecasting` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean`; `timestamp` for `lightgbm_forecaster` | `text`, `image` (exactly one) | `audio` (exactly one) | `timestamp` (the split's time column) |
+| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v2 (its snapshots always use non-tabular columns) | v2 | v2 |
+| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN | none | none | none |
+| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) | `ML_AUDIO_PYTHON` (the scikit-learn venv) | `ML_FORECASTING_PYTHON` (the scikit-learn venv) |
+| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` | `tests/conformance/transformers-*.test.ts` (task suite) | `tests/conformance/audio-*.test.ts` (task suite) | `tests/conformance/forecasting-*.test.ts` (task suite) |
 
 Known CI limit. The test job provides scikit-learn and PyTorch. The TensorFlow job provides only TensorFlow, and it runs the
 TensorFlow conformance file. The pairs involving TensorFlow in `cross-backend.test.ts` therefore run locally when all three
@@ -475,6 +475,46 @@ Backends only generate embeddings (`predict` on an embedding model). Storing vec
 pairwise similarity live in Meticule (`src/ml/embedding-service.ts`, pgvector in PostgreSQL), behind the tenant, role and
 lifecycle rules of the platform. The backend contract therefore gains no retrieval command, and every embedding backend is
 indexable as soon as it records `embedding_dimension`. See [ml-platform.md](ml.md#embedding-indexes-and-similarity-phase-4).
+
+### 13.5 Forecasting and anomaly detection (Phase 4 M7)
+
+**Forecasting** (task `forecasting`): backend `forecasting` (`seasonal_naive_forecaster`, `ridge_forecaster`) and LightGBM's
+`lightgbm_forecaster`, all over `ml/forecasting_common.py`. The only feature is the chronological split's time column, and
+the target is the numeric series (non-nullable). Random splits and cross-validation are refused before any runner starts.
+
+- **Series.** Rows are ordered by their exact UTC instant (the timestamp rules of section 19.5). Duplicate instants, irregular
+  spacing (every step must have the same length, so calendar months are refused), missing or non-finite targets, and a
+  history shorter than the model needs are refused as `invalid_time_series`.
+- **No leakage.** Features are target lags 1..`lags` and rolling means over `windows`, built with pandas `shift`/`rolling` so a
+  row's features use strictly earlier targets only. Models are fitted on the training block alone. Forecasts are recursive:
+  each step's prediction, never a future actual, feeds the next. The checks prove that changing test-block values changes
+  neither the fitted model nor the validation metrics, and that shuffled input rows give identical results.
+- **Evaluation.**
+  - The training block scores the one-step in-sample fit.
+  - Each later block uses up to 200 evenly spaced rolling origins. Each origin sees only actuals before it, forecasts
+    `horizon` steps, and is scored only on targets inside the block.
+  - Metrics are mae, rmse, smape (0/0 terms count 0) and mase. MASE is scaled by the in-sample seasonal-naive MAE of the
+    training block with `seasonal_period`, and refused when that scale is zero.
+- **Prediction.** Rows are the most recent history (timestamp and target), at least the model's context, at the training
+  spacing. The output is exactly `horizon` items `{step, timestamp, value}`, with UTC ISO timestamps continuing the series.
+- **Artifacts.** `forecast-npz-v1` NumPy archives (allow_pickle=False). The ridge model is stored as coefficients, never
+  pickled. The LightGBM forecaster keeps `lightgbm-text-v1` with forecasting metadata. LightGBM's native early stopping is not
+  offered for the forecaster, because the validation block belongs to evaluation.
+
+**Anomaly detection** (task `anomaly_detection`) runs inside the scikit-learn runner: `isolation_forest`,
+`local_outlier_factor` (novelty mode) and `robust_covariance` (elliptic envelope), over the existing tabular preprocessing.
+
+- **Unsupervised.** A boolean target, when present, is never used for fitting: the checks fit with and without labels, and
+  with flipped labels, and get identical scores.
+- **Scores and threshold.** The score is `-score_samples` (higher means more anomalous). Local outlier factor's training scores
+  come from `-negative_outlier_factor_`, since its `score_samples` must not be used on its own training rows. Every model stores
+  its training scores. The threshold is the training-score quantile at 1 - `contamination` (numeric, default 0.1, in (0, 0.5]).
+  A row is an anomaly when its score is above the threshold. The output is `{score, anomaly}` per row.
+- **Evaluation.** Labelled data gets roc_auc, average_precision and anomaly precision, recall and F1. A partition without an
+  anomaly is refused as `undefined_metric` (stratify the split). Unlabelled data gets only `threshold_calibration_error`
+  (|flagged fraction - contamination|), a diagnostic of how the threshold transfers, not of detection quality.
+- **Artifacts.** `sklearn-pickle-v1` with `artifact_schema` 2 (the payload adds the threshold and training scores). The adapter
+  supports schemas {1, 2}, classification and regression stay schema 1, and the runtime keys are unchanged.
 
 ## 14. Framework-neutrality audit
 

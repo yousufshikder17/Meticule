@@ -14,7 +14,10 @@ import { RunnerBackend } from "./runner-backend.js";
  */
 class GradientBoostingBackend extends RunnerBackend {
   constructor(id: "xgboost" | "lightgbm", artifactFormat: string, python: string, timeoutMs: number, script: string) {
-    const capabilities: BackendCapabilities = { artifactFormats: [artifactFormat], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: NEURAL_OPERATIONS, iterative: false, tasks: ["classification", "regression"], inputs: TABULAR_COLUMN_TYPES };
+    // LightGBM also forecasts (lightgbm_forecaster), reading only the split's time column; XGBoost stays tabular.
+    const forecasting = id === "lightgbm";
+    const capabilities: BackendCapabilities = { artifactFormats: [artifactFormat], checkpointFormats: [], devices: ["cpu"], precisions: ["fp32"], preprocessing: NEURAL_OPERATIONS, iterative: false,
+      tasks: forecasting ? ["classification", "regression", "forecasting"] : ["classification", "regression"], inputs: forecasting ? [...TABULAR_COLUMN_TYPES, "timestamp"] : TABULAR_COLUMN_TYPES };
     super({ id, capabilities, python, script, timeoutMs });
   }
   override validate(snapshot: Snapshot): void {

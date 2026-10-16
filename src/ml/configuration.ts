@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { AudioBackend } from "./audio-backend.js";
 import type { MlBackend } from "./backend.js";
+import { ForecastingBackend } from "./forecasting-backend.js";
 import { LightgbmBackend, XgboostBackend } from "./gbdt-backend.js";
 import { JaxBackend } from "./jax-backend.js";
 import { PytorchBackend } from "./pytorch-backend.js";
@@ -33,6 +34,8 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_TRANSFORMERS_MODEL_ROOT: z.string().default(""),
     ML_AUDIO_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_AUDIO_PYTHON: z.string().min(1).default(python),
+    ML_FORECASTING_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_FORECASTING_PYTHON: z.string().min(1).default(python),
   }).parse(env);
   const backends = new Map<string, MlBackend>();
   if (config.ML_ENABLED === "true") {
@@ -48,6 +51,7 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
       const transformers = new TransformersBackend(config.ML_TRANSFORMERS_PYTHON, root, config.ML_TIMEOUT_MS); backends.set(transformers.id, transformers);
     }
     if (config.ML_AUDIO_ENABLED === "true") { const audio = new AudioBackend(config.ML_AUDIO_PYTHON, config.ML_TIMEOUT_MS); backends.set(audio.id, audio); }
+    if (config.ML_FORECASTING_ENABLED === "true") { const forecasting = new ForecastingBackend(config.ML_FORECASTING_PYTHON, config.ML_TIMEOUT_MS); backends.set(forecasting.id, forecasting); }
   }
   return { enabled: config.ML_ENABLED === "true", backends };
 }

@@ -5,6 +5,7 @@ early-stopping training through `serve` returns clean protocol JSON. Processor i
 """
 import base64
 import json
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -156,6 +157,33 @@ for prefix, runner, extra in (("xgb", xgboost_runner, {}), ("lgb", lightgbm_runn
         results[f"{prefix}_served_training_returns_clean_json"] = process.returncode == 0 and response["contract"] == common.ML_BACKEND_CONTRACT and response["resolvedHyperparameters"]["best_iteration"] == best
     except Exception:
         results[f"{prefix}_served_training_returns_clean_json"] = False
+
+# lightgbm_forecaster: forecasting_common's features and leakage policy with a LightGBM regressor.
+ar = [0.0]
+for _ in range(299):
+    ar.append(0.8 * ar[-1] + rng.randn())
+series_rows = [{"at": f"2025-01-{1 + i // 24:02d}T{i % 24:02d}:00:00Z", "y": float(v)} for i, v in enumerate(ar)]
+forecaster = {"algorithm": "lightgbm_forecaster", "backend": "lightgbm", "seed": 3, "hyperparameters": {"lags": 3, "windows": [6], "horizon": 4, "n_estimators": 60},
+              "evaluation": {"metrics": ["mae", "rmse", "mase"]}, "split": {"id": UUID, "strategy": "chronological", "timeColumn": "at", "train": 0.6, "validation": 0.2, "test": 0.2},
+              "dataset": {"schema": {"columns": [{"name": "at", "type": "timestamp"}, {"name": "y", "type": "number"}], "target": "y"}},
+              "pipeline": {"definition": {"features": ["at"], "steps": []}}}
+fc_run = lambda command, rows, **more: lightgbm_runner.execute({"command": command, "snapshot": forecaster, "rows": rows, **more})
+fc_prepared = fc_run("prepare", series_rows)
+fc_trained = fc_run("train", series_rows, prepared=fc_prepared)
+fc_eval = fc_run("evaluate", series_rows, prepared=fc_prepared, artifact=fc_trained["artifact"])
+test_rmse = next(m["value"] for m in fc_eval["metrics"] if m["name"] == "rmse" and m["partition"] == "test")
+# Beats forecasting the series mean, whose RMSE is the AR(1) standard deviation 1 / sqrt(1 - 0.8^2) = 1.67.
+results["lgb_forecaster_learns_an_ar1_series"] = test_rmse < 1.0 / (1 - 0.8 ** 2) ** 0.5 and fc_trained["format"] == "lightgbm-text-v1"
+details["lgb_forecaster_test_rmse"] = test_rmse
+test_rows = set(fc_prepared["indices"]["test"])
+moved = [dict(r, y=r["y"] + 500.0) if i in test_rows else r for i, r in enumerate(series_rows)]
+model_text = lambda artifact: json.loads(base64.b64decode(artifact))["model"]
+results["lgb_forecaster_test_block_never_changes_the_model"] = model_text(fc_run("train", moved, prepared=fc_prepared)["artifact"]) == model_text(fc_trained["artifact"])
+shuffled_rows = list(series_rows)
+random.Random(4).shuffle(shuffled_rows)
+results["lgb_forecaster_shuffled_rows_identical"] = [m["value"] for m in fc_run("evaluate", shuffled_rows, prepared=fc_run("prepare", shuffled_rows), artifact=fc_trained["artifact"])["metrics"]] == [m["value"] for m in fc_eval["metrics"]]
+fc_out = fc_run("predict", series_rows[-20:], artifact=fc_trained["artifact"])["predictions"]
+results["lgb_forecaster_outputs_horizon_steps"] = [p["step"] for p in fc_out] == [1, 2, 3, 4] and all(p["timestamp"].endswith("Z") and np.isfinite(p["value"]) for p in fc_out)
 
 # B8: the GBDT NaN pass-through is opt-in; the neural default still refuses a missing number without an imputer.
 state = neural_common.fit_preprocessing(spec("x", "mlp_classifier", [("a", "number"), ("label", "string")], "label", ["a"], [], {}, []), [{"a": 1.0}, {"a": 2.0}], [0, 1])

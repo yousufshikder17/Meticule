@@ -14,6 +14,7 @@ describe("model catalog", () => {
     const models = listModels("sklearn");
     expect(models.filter(m => m.taskType === "classification")).toHaveLength(6);
     expect(models.filter(m => m.taskType === "regression")).toHaveLength(9);
+    expect(models.filter(m => m.taskType === "anomaly_detection").map(m => m.id).sort()).toEqual(["isolation_forest", "local_outlier_factor", "robust_covariance"]);
     expect(() => registerModels([models[0]!])).toThrow(/Duplicate/);
     expect(() => getModel("sklearn", "xgboost_classifier")).toThrow(/Unsupported/);
     expect(() => getModel("xgboost", "ridge")).toThrow(/Unsupported/);
@@ -61,8 +62,10 @@ describe("model catalog", () => {
   it("declares every model's inputs and learning, defaulting to 1-199 tabular columns and supervised", () => {
     for (const m of listModels()) {
       expect(m.inputs, m.id).toEqual({ types: ["number", "string", "boolean"], min: 1, max: 199 });
-      expect(m.learning, m.id).toBe("supervised");
-      expect(describeModel(m)).toMatchObject({ inputs: m.inputs, learning: "supervised" });
+      // Anomaly detectors (Phase 4) are the unsupervised tabular models; everything else here is supervised.
+      const learning = m.taskType === "anomaly_detection" ? "unsupervised" : "supervised";
+      expect(m.learning, m.id).toBe(learning);
+      expect(describeModel(m)).toMatchObject({ inputs: m.inputs, learning });
     }
     const embedder = defineModel({ backend: "test", id: "text_embedder", taskType: "embedding", displayName: "Text embedder", parameters: { model: { kind: "name", default: null } }, capabilities: scored, inputs: { types: ["text"], min: 1, max: 1 }, learning: "pretrained" });
     expect(describeModel(embedder)).toMatchObject({ taskType: "embedding", inputs: { types: ["text"], min: 1, max: 1 }, learning: "pretrained", defaults: { model: null } });
@@ -73,7 +76,7 @@ describe("model catalog", () => {
   it("declares truthful backend tasks and inputs: every registered model's task and input types fit its backend", () => {
     const backends = { sklearn: SKLEARN_CAPABILITIES, pytorch: new PytorchBackend("python").capabilities, tensorflow: new TensorflowBackend("python").capabilities };
     for (const [backend, capabilities] of Object.entries(backends)) {
-      expect(capabilities.tasks, backend).toEqual(["classification", "regression"]);
+      expect(capabilities.tasks, backend).toEqual(backend === "sklearn" ? ["classification", "regression", "anomaly_detection"] : ["classification", "regression"]);
       expect(capabilities.inputs, backend).toEqual(["number", "string", "boolean"]);
       const models = listModels(backend);
       expect(models.length, backend).toBeGreaterThan(0);
@@ -118,6 +121,6 @@ describe("backend extensibility", () => {
     expect(listModels("xgboost").map(m => m.id)).toEqual(["xgboost_classifier"]);
     expect(getModel("xgboost", "xgboost_classifier").backend).toBe("xgboost");
     expect(() => getModel("sklearn", "xgboost_classifier")).toThrow(/Unsupported/);
-    expect(listModels("sklearn")).toHaveLength(15);
+    expect(listModels("sklearn").filter(m => m.taskType === "classification" || m.taskType === "regression")).toHaveLength(15);
   });
 });

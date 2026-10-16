@@ -66,7 +66,7 @@ violations = {
     "different_backend": {"backend": "xgboost"},
     "unsupported_artifact_format": {"artifact_format": "joblib-v9"},
     "unsupported_protocol": {"protocol": "meticule-sklearn-v9"},
-    "unsupported_artifact_schema": {"artifact_schema": "2"},
+    "unsupported_artifact_schema": {"artifact_schema": "3"},
     "unreadable_artifact_schema": {"artifact_schema": "two"},
     "sklearn_version_differs": {"sklearn": "0.0.1"},
     "numpy_version_differs": {"numpy": "0.0.1"},
@@ -105,6 +105,6 @@ new_metrics = run("evaluate", spec, rows, prepared=old_prepared, artifact=old_mo
 results["phase1_artifact_evaluates_identically_under_phase2"] = len(new_metrics) == len(old_metrics) == 6 and all(a["name"] == b["name"] and a["partition"] == b["partition"] and abs(a["value"] - b["value"]) < 1e-12 for a, b in zip(old_metrics, new_metrics))
 results["phase1_provenance_is_untouched"] = pickle.loads(base64.b64decode(old_model["artifact"]))["environment"] == old_env
 results["phase1_artifact_still_refused_on_runtime_mismatch"] = rejected(old_model["artifact"], {**old_env, "sklearn": "0.0.1"}) and rejected(old_model["artifact"], {**old_env, "python": "2.7.18"})
-results["phase1_artifact_refused_if_schema_claimed_unsupported"] = rejected(old_model["artifact"], {**old_env, "artifact_schema": "2"})
+results["phase1_artifact_refused_if_schema_claimed_unsupported"] = rejected(old_model["artifact"], {**old_env, "artifact_schema": "3"})
 results["phase1_artifact_with_misleading_protocol_refused"] = rejected(old_model["artifact"], {**old_env, "protocol": "meticule-sklearn-v0"})
 emit(results)

@@ -17,11 +17,12 @@ describe("sklearn adapter catalog and cross-validation contract", () => {
     expect(() => backend.validate(snapshotFor({ algorithm: "logistic_regression", evaluation: { cv: { strategy: "stratified_kfold", folds: 3 }, metrics: ["f1", "log_loss"] }, stratify: true }))).not.toThrow();
   });
   it.runIf(Boolean(python))("trains, scores and reproduces every catalog model under the Python adapter", () => {
-    const metadata = Object.fromEntries(listModels("sklearn").map(m => [m.id, { taskType: m.taskType, scores: m.capabilities.scores }]));
+    // Classification and regression only: the anomaly models have their own checks (tests/python/check_anomaly.py).
+    const metadata = Object.fromEntries(listModels("sklearn").filter(m => m.taskType === "classification" || m.taskType === "regression").map(m => [m.id, { taskType: m.taskType, scores: m.capabilities.scores }]));
     const out = JSON.parse(execFileSync(python!, ["-I", resolve("tests/python/check_models.py"), JSON.stringify(metadata)], { encoding: "utf8", maxBuffer: 16_000_000, env: { ...process.env, OMP_NUM_THREADS: "1" } }).trim().split("\n").pop()!);
     expect(out.failures).toEqual([]);
     expect(out.catalog).toEqual(listModels("sklearn").map(m => m.id).sort());
     expect(Object.keys(out.summary)).toHaveLength(15);
-    for (const m of listModels("sklearn")) for (const [name, value] of Object.entries(m.defaults)) expect(out.defaults[m.id][name], `${m.id}.${name}`).toEqual(value);
+    for (const m of listModels("sklearn").filter(m => m.taskType === "classification" || m.taskType === "regression")) for (const [name, value] of Object.entries(m.defaults)) expect(out.defaults[m.id][name], `${m.id}.${name}`).toEqual(value);
   }, 240_000);
 });

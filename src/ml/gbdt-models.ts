@@ -1,3 +1,4 @@
+import { FORECAST_INPUTS, forecastSettings, lagFeatures } from "./forecasting-models.js";
 import { defineModel, registerModels, type ModelDefinition, type ParameterSpec } from "./model-catalog.js";
 
 // Bounds shared by both gradient-boosting backends (mirrored in ml/gbdt_common.py and the runners, which enforce them again).
@@ -23,6 +24,10 @@ export const XGBOOST_MODELS: readonly ModelDefinition[] = [
 export const LIGHTGBM_MODELS: readonly ModelDefinition[] = [
   defineModel({ backend: "lightgbm", id: "lightgbm_classifier", taskType: "classification", displayName: "LightGBM classifier", parameters: lightgbm, capabilities: capabilities("probability") }),
   defineModel({ backend: "lightgbm", id: "lightgbm_regressor", taskType: "regression", displayName: "LightGBM regressor", parameters: lightgbm, capabilities: capabilities("none") }),
+  // A LightGBM regressor over lag and rolling-mean features, forecasting recursively (ml/forecasting_common.py). No native
+  // early stopping: the chronological validation block belongs to evaluation.
+  defineModel({ backend: "lightgbm", id: "lightgbm_forecaster", taskType: "forecasting", displayName: "LightGBM forecaster over lags and rolling means", inputs: FORECAST_INPUTS,
+    parameters: { ...forecastSettings, ...lagFeatures, ...Object.fromEntries(Object.entries(lightgbm).filter(([name]) => name !== "early_stopping_rounds")) }, capabilities: capabilities("none") }),
 ];
 
 registerModels([...XGBOOST_MODELS, ...LIGHTGBM_MODELS]);

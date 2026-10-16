@@ -10,6 +10,7 @@ import { SklearnBackend } from "../../src/ml/sklearn-backend.js";
 import { TensorflowBackend } from "../../src/ml/tensorflow-backend.js";
 import { ROWS, signal, snapshotWith } from "./contract-suite.js";
 import { audioTarget } from "./audio-fixtures.js";
+import { forecastTarget } from "./series-fixtures.js";
 import { transformersTarget } from "./transformers-fixtures.js";
 import type { TaskTarget } from "./task-suite.js";
 import { snapshotFor } from "../unit/ml-fixtures.js";
@@ -158,21 +159,22 @@ describe.runIf(Boolean(sklearnPython && gbdtPython))("scikit-learn, XGBoost and 
 /** Trains a Phase 4 task model on its own fixture; returns the backend, its snapshot and the artifact it wrote. */
 async function trainedTask(target: TaskTarget) {
   const backend = target.create();
-  const snap = snapshotFor({ backend: target.id, algorithm: target.algorithm, columns: target.columns, target: target.target, features: [target.feature], hyperparameters: target.hyperparameters, rowCount: target.rows.length });
+  const snap = snapshotFor({ backend: target.id, algorithm: target.algorithm, columns: target.columns, target: target.target, features: [target.feature], hyperparameters: target.hyperparameters, rowCount: target.rows.length, ...(target.split ? { split: target.split } : {}) });
   const prepared = await backend.prepare(snap, target.rows, signal());
-  return { backend, snap, rows: target.rows, model: await backend.train(snap, target.rows, prepared, signal()) };
+  return { backend, snap, rows: target.predictRows ?? target.rows.slice(0, 2), model: await backend.train(snap, target.rows, prepared, signal()) };
 }
 
 for (const [name, make, python] of [
   ["transformers", () => transformersTarget("text_embedder", "tiny-bert-encoder", "text", false, ["mean_pairwise_cosine"]), process.env.ML_TEST_TRANSFORMERS_PYTHON ?? ""],
   ["audio", () => audioTarget("audio_features", false, ["mean_pairwise_cosine"]), process.env.ML_TEST_AUDIO_PYTHON ?? ""],
+  ["forecasting", () => forecastTarget("forecasting", "ridge_forecaster", { lags: 3, horizon: 2 }), process.env.ML_TEST_PYTHON ?? ""],
 ] as const) {
   describe.runIf(Boolean(sklearnPython && python))(`scikit-learn and ${name} refuse each other's artifacts`, () => {
     it(`refuses a scikit-learn artifact in ${name} and a ${name} artifact in scikit-learn`, async () => {
       const sklearn = new SklearnBackend(sklearnPython);
       const fromSklearn = await trainedArtifact(sklearn, "logistic_regression", {});
       const task = await trainedTask(make());
-      expect(await refusalOf(task.backend.predict(task.snap, fromSklearn.model.bytes, task.rows.slice(0, 2), fromSklearn.model.environment, signal()))).toBe("incompatible_artifact");
+      expect(await refusalOf(task.backend.predict(task.snap, fromSklearn.model.bytes, task.rows, fromSklearn.model.environment, signal()))).toBe("incompatible_artifact");
       expect(await refusalOf(sklearn.predict(receiverSnapshot(sklearn), task.model.bytes, ROWS.slice(0, 3), task.model.environment, signal()))).toBe("incompatible_artifact");
     }, 600_000);
   });

@@ -13,12 +13,13 @@ import threadpoolctl
 
 import ml_runtime_common as common
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import (GradientBoostingClassifier, GradientBoostingRegressor,
+from sklearn.covariance import EllipticEnvelope
+from sklearn.ensemble import (GradientBoostingClassifier, GradientBoostingRegressor, IsolationForest,
                               RandomForestClassifier, RandomForestRegressor)
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor, LocalOutlierFactor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, OrdinalEncoder, StandardScaler
 from sklearn.svm import SVC, SVR
@@ -41,8 +42,12 @@ MODELS = {
     "svr": (SVR, "regression"),
     "k_neighbors_regressor": (KNeighborsRegressor, "regression"),
     "decision_tree_regressor": (DecisionTreeRegressor, "regression"),
+    # Anomaly detection (Phase 4): unsupervised; labels, when present, are used only for evaluation.
+    "isolation_forest": (IsolationForest, "anomaly_detection"),
+    "local_outlier_factor": (LocalOutlierFactor, "anomaly_detection"),
+    "robust_covariance": (EllipticEnvelope, "anomaly_detection"),
 }
-SINGLE_THREAD = (RandomForestClassifier, RandomForestRegressor, KNeighborsClassifier, KNeighborsRegressor)
+SINGLE_THREAD = (RandomForestClassifier, RandomForestRegressor, KNeighborsClassifier, KNeighborsRegressor, IsolationForest, LocalOutlierFactor)
 DEFAULT_METRICS = {"classification": ["accuracy"], "regression": ["mae", "mse"]}
 
 
@@ -53,13 +58,16 @@ DEFAULT_METRICS = {"classification": ["accuracy"], "regression": ["mae", "mse"]}
 # Bump ARTIFACT_SCHEMA only when a fitted artifact written by one adapter can no longer be used by another:
 # the payload is {"pipeline": fitted sklearn Pipeline (last step = estimator, predicts from the matrix that
 # to_matrix builds for the pipeline's features), "environment": dict}. Implementation-only edits do not bump it.
+# Anomaly-detection artifacts are schema 2: the same payload plus {"anomaly": {threshold, contamination, trainScores}}.
+# Classification and regression keep writing schema 1, so their artifacts load in adapters that know only schema 1.
 BACKEND = "sklearn"
 ARTIFACT_FORMAT = "sklearn-pickle-v1"
 ARTIFACT_SCHEMA = 1
 PROTOCOL = "meticule-sklearn-v2"
 # protocol -> artifact schema it implies when the artifact predates explicit schema versions (Phase 1 wrote none).
 SUPPORTED_PROTOCOLS = {"meticule-sklearn-v1": 1, PROTOCOL: 1}
-SUPPORTED_SCHEMAS = {1}
+SUPPORTED_SCHEMAS = {1, 2}
+ANOMALY_SCHEMA = 2
 RUNTIME_KEYS = ("sklearn", "numpy", "scipy", "joblib", "threadpoolctl")
 
 
@@ -137,6 +145,12 @@ def build_pipeline(spec):
         branches.append(("categorical", Pipeline(cat_steps), categorical))
     cls, _ = MODELS[spec["algorithm"]]
     params = dict(spec["hyperparameters"])
+    if MODELS[spec["algorithm"]][1] == "anomaly_detection":
+        params.setdefault("contamination", 0.1)  # the catalog's numeric default (scikit-learn's own is "auto" for some models)
+    if cls is IsolationForest and params.get("max_samples") is None:
+        params["max_samples"] = "auto"  # the catalog's null means scikit-learn's own default
+    if cls is LocalOutlierFactor:
+        params["novelty"] = True  # score_samples on new rows; training rows use negative_outlier_factor_
     accepted = cls().get_params()
     if "random_state" in accepted:
         params["random_state"] = spec["seed"]
@@ -191,7 +205,11 @@ def execute(request):
     if command == "predict":
         # Only checksum-verified worker-produced artifacts reach this process. Never accept uploads.
         model = load_artifact(request["artifact"], env)
+        if MODELS[spec["algorithm"]][1] == "anomaly_detection":
+            return {"predictions": anomaly_outputs(model, x)}
         return {"predictions": model["pipeline"].predict(x).tolist()}
+    if MODELS[spec["algorithm"]][1] == "anomaly_detection":
+        return execute_anomaly(request, spec, rows, x, env)
     y = np.array([row[spec["dataset"]["schema"]["target"]] for row in rows])
     cv = (spec.get("evaluation") or {}).get("cv")
     if command == "prepare":
@@ -240,6 +258,79 @@ def execute(request):
                 series = np.array([f[n] for f in per_fold])
                 metrics.append({"name": n, "partition": "cv", "value": float(series.mean()), "direction": DIRECTIONS[n], "std": float(series.std())})
             performance["cvFitSeconds"] = fit_total
+        return {"metrics": metrics, "performance": performance}
+    raise ValueError("Unknown backend command")
+
+
+# ---- anomaly detection --------------------------------------------------------------------------------------------------
+# Score = -score_samples, so a higher score is more anomalous. LocalOutlierFactor's score_samples must not be used on its
+# own training rows, so training scores come from negative_outlier_factor_ (negated), and every model stores its training
+# scores. Threshold = numpy quantile (linear interpolation) of the training scores at 1 - contamination; a row is an anomaly
+# when its score is strictly above it.
+
+def anomaly_scores(model, x):
+    return (-model["pipeline"].score_samples(x)).astype(float)
+
+
+def anomaly_outputs(model, x):
+    if "anomaly" not in model:
+        raise IncompatibleArtifact("artifact is not an anomaly-detection artifact")
+    scores = anomaly_scores(model, x) if len(x) else np.zeros(0)
+    return [{"score": float(s), "anomaly": bool(s > model["anomaly"]["threshold"])} for s in scores]
+
+
+def execute_anomaly(request, spec, rows, x, env):
+    """Unsupervised fit on training rows only; a boolean target, when present, is used only to evaluate."""
+    target = spec["dataset"]["schema"].get("target")
+    labels = np.array([bool(row[target]) for row in rows]) if target is not None else None
+    command = request["command"]
+    if (spec.get("evaluation") or {}).get("cv"):
+        raise ValueError("Cross-validation is not supported for anomaly detection")
+    if command == "prepare":
+        return {**common.split_partitions(spec, rows, labels), "environment": env}
+    anomaly_env = {**env, "artifact_schema": str(ANOMALY_SCHEMA)}
+    if command == "train":
+        pipeline = build_pipeline(spec)
+        train = request["prepared"]["indices"]["train"]
+        contamination = float(pipeline[-1].get_params()["contamination"])
+        started = time.perf_counter()
+        pipeline.fit(x[train])
+        fit_seconds = time.perf_counter() - started
+        estimator = pipeline[-1]
+        train_scores = (-estimator.negative_outlier_factor_ if isinstance(estimator, LocalOutlierFactor) else -pipeline.score_samples(x[train])).astype(float)
+        threshold = float(np.quantile(train_scores, 1.0 - contamination))
+        payload = pickle.dumps({"pipeline": pipeline, "environment": anomaly_env,
+                                "anomaly": {"threshold": threshold, "contamination": contamination, "trainScores": train_scores.tolist()}}, protocol=5)
+        resolved = {k: v for k, v in estimator.get_params(deep=False).items() if not callable(v)}
+        return {"artifact": base64.b64encode(payload).decode(), "format": ARTIFACT_FORMAT, "environment": anomaly_env,
+                "resolvedHyperparameters": resolved, "performance": {"fitSeconds": fit_seconds}}
+    if command == "evaluate":
+        model = load_artifact(request["artifact"], env)
+        if "anomaly" not in model:
+            raise IncompatibleArtifact("artifact is not an anomaly-detection artifact")
+        names = common.requested_metrics(spec, "anomaly_detection", labels is not None)
+        prepared, metrics, performance = request["prepared"]["indices"], [], {}
+        threshold, contamination = model["anomaly"]["threshold"], model["anomaly"]["contamination"]
+        for partition in ("train", "validation", "test"):
+            indices = prepared[partition]
+            started = time.perf_counter()
+            scores = np.array(model["anomaly"]["trainScores"]) if partition == "train" else anomaly_scores(model, x[indices])
+            if len(scores) != len(indices):
+                raise IncompatibleArtifact("training scores do not match the training partition")
+            flags = scores > threshold
+            values = {}
+            for name in names:
+                if name == "threshold_calibration_error":
+                    values[name] = common.threshold_calibration_error(flags, contamination)
+                elif name == "roc_auc":
+                    values[name] = common.anomaly_roc_auc(labels[indices], scores)
+                elif name == "average_precision":
+                    values[name] = common.average_precision(labels[indices], scores)
+                else:
+                    values[name] = common.anomaly_scores(labels[indices], flags)[name]
+            if partition == "test":
+                performance["predictSeconds"] = time.perf_counter() - started
+            metrics.extend({"name": n, "partition": partition, "value": v, "direction": common.DIRECTIONS[n]} for n, v in values.items())
         return {"metrics": metrics, "performance": performance}
     raise ValueError("Unknown backend command")
 

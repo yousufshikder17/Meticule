@@ -17,7 +17,7 @@ export const SKLEARN_CAPABILITIES = {
   precisions: ["fp32"],
   preprocessing: SKLEARN_PREPROCESSING,
   iterative: false,
-  tasks: ["classification", "regression"],
+  tasks: ["classification", "regression", "anomaly_detection"],
   inputs: TABULAR_COLUMN_TYPES,
 } as const satisfies BackendCapabilities;
 

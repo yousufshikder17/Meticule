@@ -28,3 +28,16 @@ export function wav(frequency: number, seconds = 0.3, rate = 16000, amplitude = 
   return Buffer.concat([header, data]).toString("base64");
 }
 export const AUDIO_ROWS: Row[] = Array.from({ length: 30 }, (_, i) => ({ x: i % 2 ? wav(200 + 15 * (i % 7)) : wav(2500 + 40 * (i % 7)), label: i % 2 ? "low" : "high" }));
+
+/** A deterministic hourly AR(1)-like series (timestamp + value) for forecasting; no randomness, so every runtime agrees. */
+export const SERIES_ROWS: Row[] = (() => {
+  const rows: Row[] = []; let y = 0;
+  for (let i = 0; i < 160; i++) { y = 0.8 * y + Math.sin(i * 1.7) + 0.5 * Math.cos(i * 0.31); rows.push({ at: new Date(Date.UTC(2025, 0, 1) + i * 3_600_000).toISOString(), y }); }
+  return rows;
+})();
+
+/** Tabular rows with planted far outliers; `outlier` is the boolean label (anomaly = true), never a feature. */
+export const ANOMALY_ROWS: Row[] = Array.from({ length: 120 }, (_, i) => {
+  const planted = i % 15 === 0;
+  return { a: planted ? 8 * Math.sign(Math.sin(i)) : Math.sin(i * 1.3), b: planted ? -8 : Math.cos(i * 0.7), outlier: planted };
+});

@@ -9,7 +9,7 @@ const gbdtPython = process.env.ML_TEST_XGBOOST_PYTHON && process.env.ML_TEST_LIG
 it.runIf(Boolean(gbdtPython))("real XGBoost and LightGBM runners: learning, determinism, validation-only early stopping, best iteration, NaN, safe envelopes and refusals", () => {
   const out = JSON.parse(execFileSync(gbdtPython!, ["-I", resolve("tests/python/check_gbdt.py")], { encoding: "utf8", maxBuffer: 16_000_000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } }).trim().split("\n").pop()!) as { results: Record<string, boolean> };
   expect(Object.entries(out.results).filter(([, value]) => value !== true).map(([name]) => name)).toEqual([]);
-  expect(Object.keys(out.results)).toHaveLength(2 * 22 + 2); // a dropped check must fail the suite, not pass quietly
+  expect(Object.keys(out.results)).toHaveLength(2 * 22 + 4 + 2); // a dropped check must fail the suite, not pass quietly
 }, 900_000);
 
 // The dedicated gradient-boosting CI job sets ML_GBDT_JOB. Only that job must provide the pinned runtimes.

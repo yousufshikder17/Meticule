@@ -13,8 +13,9 @@ const gbdtSnapshot = (backend: string, opts: Parameters<typeof snapshotFor>[0] =
 describe("gradient-boosting catalog (Phase 4 M3)", () => {
   it("registers native classifier and regressor definitions under each backend: seeded, scale-insensitive, one-shot, CPU", () => {
     for (const backend of ["xgboost", "lightgbm"]) {
-      const models = listModels(backend);
-      expect(models.map(m => m.id).sort()).toEqual([`${backend}_classifier`, `${backend}_regressor`]);
+      // LightGBM also registers its forecaster (Phase 4 M7), which reads a timestamp and is tested in ml-forecasting.test.ts.
+      const models = listModels(backend).filter(m => m.taskType !== "forecasting");
+      expect(listModels(backend).map(m => m.id).sort()).toEqual(backend === "lightgbm" ? ["lightgbm_classifier", "lightgbm_forecaster", "lightgbm_regressor"] : [`${backend}_classifier`, `${backend}_regressor`]);
       for (const m of models) {
         expect(m.capabilities).toMatchObject({ seeded: true, scaleSensitive: false, iterative: false, devices: ["cpu"] });
         expect(() => validateHyperparameters(m, m.defaults), m.id).not.toThrow();
@@ -34,7 +35,7 @@ describe("gradient-boosting catalog (Phase 4 M3)", () => {
 describe("gradient-boosting backend validation", () => {
   for (const backend of [new XgboostBackend("unused"), new LightgbmBackend("unused")]) {
     it(`${backend.id}: declares exactly what its runner does`, () => {
-      expect(backend.capabilities).toMatchObject({ devices: ["cpu"], precisions: ["fp32"], iterative: false, checkpointFormats: [], tasks: ["classification", "regression"] });
+      expect(backend.capabilities).toMatchObject({ devices: ["cpu"], precisions: ["fp32"], iterative: false, checkpointFormats: [], tasks: backend.id === "lightgbm" ? ["classification", "regression", "forecasting"] : ["classification", "regression"] });
       expect(backend.capabilities.artifactFormats).toEqual([backend.id === "xgboost" ? "xgboost-json-v1" : "lightgbm-text-v1"]);
       expect(() => backend.validate(gbdtSnapshot(backend.id))).not.toThrow();
     });

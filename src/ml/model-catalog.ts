@@ -9,7 +9,7 @@ type DefaultValue = Scalar | number[];
 // One declaration drives validation, discovery and search-space checks; unknown parameters are never forwarded.
 export type ParameterSpec =
   | { kind: "int"; min: number; max: number; nullable?: boolean; default: number | null }
-  | { kind: "float"; min: number; max: number; openMin?: boolean; default: number }
+  | { kind: "float"; min: number; max: number; openMin?: boolean; nullable?: boolean; default: number | null }
   | { kind: "choice"; values: readonly Scalar[]; default: Scalar }
   | { kind: "bool"; default: boolean }
   // Bounded list of integers, e.g. hidden layer widths. Only neural definitions use it; search spaces reject it.
@@ -56,7 +56,7 @@ function schemaFor(parameters: Record<string, ParameterSpec>): z.ZodType<Record<
   for (const [name, spec] of Object.entries(parameters)) {
     let type: z.ZodType;
     if (spec.kind === "int") { type = z.int().min(spec.min).max(spec.max); if (spec.nullable) type = type.nullable(); }
-    else if (spec.kind === "float") type = spec.openMin ? z.number().gt(spec.min).max(spec.max) : z.number().min(spec.min).max(spec.max);
+    else if (spec.kind === "float") { type = spec.openMin ? z.number().gt(spec.min).max(spec.max) : z.number().min(spec.min).max(spec.max); if (spec.nullable) type = type.nullable(); }
     else if (spec.kind === "bool") type = z.boolean();
     else if (spec.kind === "intList") type = z.array(z.int().min(spec.min).max(spec.max)).min(spec.minItems).max(spec.maxItems);
     else if (spec.kind === "name") type = z.string().regex(MODEL_NAME).nullable();
@@ -107,7 +107,22 @@ export const SKLEARN_MODELS: readonly ModelDefinition[] = [
   define("svr", "regression", "Support vector regressor", { C, ...svm, epsilon: { kind: "float", min: 0, max: 1e6, default: .1 } }, { scores: "none", scaleSensitive: true, seeded: false }, kernelDegree),
   define("k_neighbors_regressor", "regression", "k-nearest neighbors regressor", knn, { scores: "none", scaleSensitive: true, seeded: false }),
   define("decision_tree_regressor", "regression", "Decision tree regressor", { max_depth: depth(), min_samples_leaf: leaf, min_samples_split: { kind: "int", min: 2, max: 1000, default: 2 }, criterion: { kind: "choice", values: ["squared_error", "absolute_error"], default: "squared_error" } }, { scores: "none", scaleSensitive: false, seeded: true }),
+  // Anomaly detection (Phase 4): unsupervised, scored by -score_samples (higher = more anomalous). contamination is the
+  // expected anomaly fraction that sets the threshold; it is numeric here (scikit-learn's own default is "auto").
+  ...anomalyModels(),
 ];
+
+function anomalyModels(): ModelDefinition[] {
+  const contamination: ParameterSpec = { kind: "float", min: 0, max: 0.5, openMin: true, default: 0.1 };
+  const scored = (seeded: boolean, scaleSensitive: boolean) => ({ scores: "decision", scaleSensitive, seeded } as const);
+  const anomaly = (id: string, displayName: string, parameters: Record<string, ParameterSpec>, capabilities: ModelCapabilities) =>
+    defineModel({ backend: "sklearn", id, taskType: "anomaly_detection", displayName, learning: "unsupervised", parameters, capabilities });
+  return [
+    anomaly("isolation_forest", "Isolation forest", { n_estimators: trees, max_samples: { kind: "int", min: 1, max: 100_000, nullable: true, default: null }, contamination }, scored(true, false)),
+    anomaly("local_outlier_factor", "Local outlier factor (novelty)", { n_neighbors: { kind: "int", min: 1, max: 200, default: 20 }, contamination }, scored(false, true)),
+    anomaly("robust_covariance", "Robust covariance (elliptic envelope)", { support_fraction: { kind: "float", min: 0, max: 1, openMin: true, nullable: true, default: null }, contamination }, scored(true, true)),
+  ];
+}
 
 // Backends register their definitions here; an optional XGBoost/LightGBM package would add its own array without touching callers.
 const catalog = new Map<string, ModelDefinition>();

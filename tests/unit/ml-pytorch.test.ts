@@ -21,7 +21,7 @@ describe("PyTorch model catalog (Phase 3A)", () => {
       expect(m.defaults.hiddenLayers).toEqual([64, 32]);
     }
     expect(mlp().capabilities.scores).toBe("probability"); expect(mlp("mlp_regressor").capabilities.scores).toBe("none");
-    expect(listModels("sklearn")).toHaveLength(15);
+    expect(listModels("sklearn").filter(m => m.taskType === "classification" || m.taskType === "regression")).toHaveLength(15);
   });
   it("accepts a bounded architecture and an explicit training configuration", () => {
     expect(validateHyperparameters(mlp(), { hiddenLayers: [128, 64, 32], activation: "gelu", dropout: 0.5, epochs: 50, batchSize: 64, learningRate: 0.0005, optimizer: "adamw", loss: "cross_entropy" })).toMatchObject({ hiddenLayers: [128, 64, 32] });
