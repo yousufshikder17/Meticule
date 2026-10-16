@@ -9,6 +9,7 @@ import { PostgresArtifactStore } from "./artifact-store.js";
 import { mlConfiguration } from "./configuration.js";
 import { MlTrainingService, QueueTraining, authorizeMl } from "./persistence.js";
 import { MlModelService, ModelTransitionInput } from "./model-service.js";
+import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerExperimentRoutes } from "./experiment-routes.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
@@ -67,6 +68,7 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlCon
     return c.json(record, record.status === "FAILED" ? 422 : 200);
   });
   registerExperimentRoutes(app, ml);
+  registerEmbeddingRoutes(app, ml);
   app.get("/ml/endpoints/:id/predictions", async c => {
     const p = c.get("principal"); authorizeMl(p);
     return c.json((await c.get("database").query("SELECT * FROM ml_predictions WHERE tenant_id=$1 AND endpoint_id=$2 ORDER BY created_at DESC,id LIMIT 100", [p.tenantId, id(c.req.param("id"))])).rows);

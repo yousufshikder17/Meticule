@@ -469,6 +469,13 @@ passed the media rules of section 19.5.
   broadband clip by a moves only the first coefficient's mean, by 2 ln a * sqrt(nMels). The classifier separates
   low from high tones and noise from tone. These are signal-processing features, not a learned speech or audio-event model.
 
+### 13.4 Retrieval and similarity are not backend operations (Phase 4 M6)
+
+Backends only generate embeddings (`predict` on an embedding model). Storing vectors, building indexes, exact search and
+pairwise similarity live in Meticule (`src/ml/embedding-service.ts`, pgvector in PostgreSQL), behind the tenant, role and
+lifecycle rules of the platform. The backend contract therefore gains no retrieval command, and every embedding backend is
+indexable as soon as it records `embedding_dimension`. See [ml-platform.md](ml.md#embedding-indexes-and-similarity-phase-4).
+
 ## 14. Framework-neutrality audit
 
 Findings from a search of the ML subsystem for framework assumptions. Each is classified: **A** belongs in the generic contract,
