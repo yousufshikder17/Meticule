@@ -60,18 +60,24 @@ export abstract class RunnerBackend implements MlBackend {
     const labelled = snapshot.dataset.schema.target !== undefined;
     // The Phase 4 rules (task registry, modalities, chronological split) apply only to snapshots that need contract v2, so a
     // stored v1 model (e.g. a boolean-target ridge) keeps validating, serving and resuming exactly as in Phase 3 (A4).
+    // A model's declared inputs hold under every contract: a text, image or audio model never runs on a tabular column, even
+    // when the snapshot alone would select v1. For Phase 3 models (tabular inputs, 1..199 features) this is the schema's own
+    // rule, so v1 behaviour is unchanged. A missing feature is left to validatePipeline, which reports it by name.
+    const schema = snapshot.dataset.schema, featureNames = snapshot.pipeline.definition.features;
+    const featureColumns = featureNames.map(name => schema.columns.find(c => c.name === name)).filter(c => c !== undefined);
+    if (featureNames.length < model.inputs.min || featureNames.length > model.inputs.max) throw new ConflictError("Feature count is outside the model input bounds");
+    if (featureColumns.some(c => !model.inputs.types.includes(c.type) || !this.capabilities.inputs.includes(c.type))) throw new ConflictError("Model or backend does not support the feature column types");
     if (contractFor(snapshot, model.taskType) === ML_BACKEND_CONTRACT_V2) {
-      const task = TASKS[model.taskType], schema = snapshot.dataset.schema;
-      const features = snapshot.pipeline.definition.features.map(name => schema.columns.find(c => c.name === name)!);
+      const task = TASKS[model.taskType], features = featureColumns;
       if (!this.capabilities.tasks.includes(model.taskType)) throw new ConflictError("Backend does not support this task");
-      if (features.length < model.inputs.min || features.length > model.inputs.max) throw new ConflictError("Feature count is outside the model input bounds");
-      if (features.some(c => !model.inputs.types.includes(c.type) || !this.capabilities.inputs.includes(c.type))) throw new ConflictError("Model or backend does not support the feature column types");
       const target = schema.columns.find(c => c.name === schema.target);
       if (!target && task.target === "required") throw new ConflictError(`${model.taskType} requires a target`);
       if (target && !task.targetTypes.includes(target.type)) throw new ConflictError("Target type is not supported for this task");
       if (!task.splits.includes(snapshot.split.strategy)) throw new ConflictError("Split strategy is not supported for this task");
       if (snapshot.evaluation.cv && snapshot.split.strategy === "chronological") throw new ConflictError("Cross-validation is not supported with a chronological split");
       if (snapshot.evaluation.cv && !task.crossValidation) throw new ConflictError("Cross-validation is not supported for this task");
+      // A pretrained model fits nothing, so there is nothing for cross-validation to refit per fold.
+      if (snapshot.evaluation.cv && model.learning === "pretrained") throw new ConflictError("Cross-validation is not supported for pretrained models");
       if (!labelled && snapshot.split.strategy === "random" && snapshot.split.stratify) throw new ConflictError("Stratification requires a target");
       const sizes = Object.values(partitionSizes(snapshot.split, snapshot.dataset.rowCount));
       if (snapshot.split.strategy === "chronological") {

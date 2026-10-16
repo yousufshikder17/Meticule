@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import type { MlBackend } from "./backend.js";
 import { LightgbmBackend, XgboostBackend } from "./gbdt-backend.js";
@@ -5,6 +7,7 @@ import { JaxBackend } from "./jax-backend.js";
 import { PytorchBackend } from "./pytorch-backend.js";
 import { SklearnBackend } from "./sklearn-backend.js";
 import { TensorflowBackend } from "./tensorflow-backend.js";
+import { TransformersBackend } from "./transformers-backend.js";
 
 export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
   const python = process.platform === "win32" ? "python" : "python3";
@@ -23,6 +26,10 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_XGBOOST_PYTHON: z.string().min(1).default(python),
     ML_LIGHTGBM_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_LIGHTGBM_PYTHON: z.string().min(1).default(python),
+    // Pretrained models are provisioned by operators under one platform-wide root, shared by every tenant.
+    ML_TRANSFORMERS_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_TRANSFORMERS_PYTHON: z.string().min(1).default(python),
+    ML_TRANSFORMERS_MODEL_ROOT: z.string().default(""),
   }).parse(env);
   const backends = new Map<string, MlBackend>();
   if (config.ML_ENABLED === "true") {
@@ -32,6 +39,15 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     if (config.ML_JAX_ENABLED === "true") { const jax = new JaxBackend(config.ML_JAX_PYTHON, config.ML_TIMEOUT_MS); backends.set(jax.id, jax); }
     if (config.ML_XGBOOST_ENABLED === "true") { const xgboost = new XgboostBackend(config.ML_XGBOOST_PYTHON, config.ML_TIMEOUT_MS); backends.set(xgboost.id, xgboost); }
     if (config.ML_LIGHTGBM_ENABLED === "true") { const lightgbm = new LightgbmBackend(config.ML_LIGHTGBM_PYTHON, config.ML_TIMEOUT_MS); backends.set(lightgbm.id, lightgbm); }
+    if (config.ML_TRANSFORMERS_ENABLED === "true") {
+      const root = config.ML_TRANSFORMERS_MODEL_ROOT;
+      if (!isAbsolute(root) || !isDirectory(root)) throw new Error("ML_TRANSFORMERS_MODEL_ROOT must be an absolute path to an existing directory");
+      const transformers = new TransformersBackend(config.ML_TRANSFORMERS_PYTHON, root, config.ML_TIMEOUT_MS); backends.set(transformers.id, transformers);
+    }
   }
   return { enabled: config.ML_ENABLED === "true", backends };
+}
+
+function isDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory(); } catch { return false; }
 }

@@ -441,3 +441,18 @@ def mean_pairwise_cosine(vectors):
     units = _unit_rows(vectors)
     total, n = units.sum(axis=0), len(units)
     return float((total @ total - n) / (n * (n - 1)))
+
+
+def embedding_metrics(names, vectors, labels):
+    """The requested embedding metrics for one partition (D1/D2): the retrieval pair needs labels, mean_pairwise_cosine
+    does not. Every embedding backend's evaluate uses this, so the edge-case refusals are the same everywhere."""
+    retrieval = retrieval_scores(vectors, labels) if {"retrieval_precision_at_1", "retrieval_mrr"} & set(names) else {}
+    values = {}
+    for name in names:
+        if name == "mean_pairwise_cosine":
+            values[name] = mean_pairwise_cosine(vectors)
+        elif name in retrieval:
+            values[name] = retrieval[name]
+        else:
+            raise ValueError("Metric does not apply to embeddings")
+    return values

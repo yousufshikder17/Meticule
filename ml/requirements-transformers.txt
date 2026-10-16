@@ -1,0 +1,14 @@
+# Hugging Face Transformers backend (Phase 4). CPU only: install torch from the CPU wheel index first
+# (pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1); the pin below then sees it satisfied.
+# Models are never downloaded by the platform: operators provision them under ML_TRANSFORMERS_MODEL_ROOT.
+# typer, regex and hf-xet are transformers/huggingface-hub dependencies, pinned to releases at least two weeks old.
+-r requirements.txt
+torch==2.9.1
+transformers==5.17.0
+tokenizers==0.23.2
+safetensors==0.8.0
+pillow==12.3.0
+huggingface-hub==1.33.0
+hf-xet==1.6.0
+typer==0.27.2
+regex==2026.9.10

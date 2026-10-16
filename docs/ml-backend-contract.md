@@ -357,20 +357,20 @@ change.
 
 ## 13. Current implementations
 
-| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM |
-| --- | --- | --- | --- | --- | --- | --- |
-| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` |
-| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` |
-| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) |
-| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` |
-| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` |
-| Iterative | no | yes | yes | yes | no | no |
-| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` |
-| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` |
-| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 |
-| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN |
-| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` |
-| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` |
+| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM | Transformers |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` | `TransformersBackend` |
+| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` | `transformers-reference-v1` |
+| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) | none (one-shot) |
+| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` |
+| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` |
+| Iterative | no | yes | yes | yes | no | no | no |
+| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `embedding` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `text`, `image` (exactly one) |
+| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v2 (its snapshots always use non-tabular columns) |
+| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN | none |
+| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) |
+| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` | `tests/conformance/transformers-*.test.ts` (task suite) |
 
 Known CI limit. The test job provides scikit-learn and PyTorch. The TensorFlow job provides only TensorFlow, and it runs the
 TensorFlow conformance file. The pairs involving TensorFlow in `cross-backend.test.ts` therefore run locally when all three
@@ -402,6 +402,48 @@ default still refuses them), and both frameworks route NaN natively.
 - **Bounds.** snake_case hyperparameters, bounded in the catalog and enforced again by the runner. Unknown names are refused,
   never forwarded to the framework.
 - **Devices.** CPU only. CUDA is refused as `cuda_unsupported`.
+
+### 13.2 Hugging Face Transformers (Phase 4 M4)
+
+Backend `transformers` (CPU, fp32, one-shot): pretrained BERT/DistilBERT text models and ViT image models that an operator has
+provisioned under `ML_TRANSFORMERS_MODEL_ROOT`, an absolute existing directory. The root is platform-wide: every tenant may use
+every provisioned model. Each model is one directory holding the Hugging Face files and a `meticule-model.json` manifest
+(`{schema: 1, name, kind, family, source: {repository, revision}, license?, files: {relpath: sha256}}`), written by
+`ml/transformers_manifest.py <model_dir> <kind> <family> <repository> <revision> [license]`.
+
+| Model | Task | Learning | Input | Kind / families |
+| --- | --- | --- | --- | --- |
+| `text_classifier` | classification | pretrained (binds its labels) | one `text` | text-classifier / bert, distilbert |
+| `text_embedder` | embedding | pretrained | one `text` | text-encoder / bert, distilbert |
+| `text_embedding_classifier` | classification | supervised: softmax head over the frozen encoder | one `text` | text-encoder / bert, distilbert |
+| `image_classifier` | classification | pretrained (binds its labels) | one `image` | image-classifier / vit |
+| `image_embedder` | embedding | pretrained | one `image` | image-encoder / vit |
+| `image_embedding_classifier` | classification | supervised: softmax head over the frozen encoder | one `image` | image-encoder / vit |
+
+- **Provisioning check (every command, before any framework code touches the files).**
+  - The name matches `^[a-z0-9][a-z0-9._-]{0,63}$` and resolves inside the root.
+  - Every entry is a regular file or directory: no symlink, junction or other reparse point.
+  - The casefolded listing equals the manifest plus `meticule-model.json`, with no case-only duplicates and at most 64 files.
+  - Manifest keys have no `.`/`..` segments, and only allowlisted filenames are accepted: safetensors weights, configs,
+    tokenizer and processor files. No `.py`, `.bin`, `.pt`, `.pkl`, `.h5` or shard index.
+  - `config.json` has no `auto_map` or `transformers_weights`, and its `model_type` equals the manifest family.
+  - The total size is at most 2 GiB.
+  - Every file is copied into a fresh private directory while it is hashed, and only that copy is loaded.
+- **Loading.**
+  - Concrete classes, `local_files_only`, `use_safetensors=True`, `trust_remote_code=False`, `dtype=float32`.
+  - Encoders load without a pooling layer.
+  - Any missing, mismatched or unexpected weight (beyond an unused pooler) is refused, never randomly initialised.
+  - At most 400M parameters. The image processor is the PIL one. `HF_HOME`/`HF_HUB_CACHE` point at a per-call empty directory.
+- **Inputs.** Tokenisation always truncates at min(tokenizer limit, position embeddings, `maxLength`). Images pass
+  `media_common` first, then Pillow (PNG/JPEG only, a pixel cap, decompression-bomb warnings as errors), one at a time.
+- **Embeddings** are mean-pooled over real tokens (or the first token), optionally L2-normalised, and their dimension is recorded
+  as `embedding_dimension`. Pretrained models refuse cross-validation, because nothing is fitted.
+- **Artifact `transformers-reference-v1`** is JSON. It holds the model reference (name, kind, family, repository, revision and the
+  verified digest), labels, settings and any trained head (`ml/linear_heads.py`), never base weights. Every load re-verifies
+  the provisioned model and refuses a changed digest. Environments record the model name, family and digest, never a path.
+- **Tests** use tiny random models generated offline (`tests/python/hf_fixtures.py`), including a malicious variant for each
+  provisioning rule. They prove the execution path and the safety rules, not semantic quality. Fine-tuning the encoder itself
+  (and PEFT/LoRA) is not part of Phase 4.
 
 ## 14. Framework-neutrality audit
 
@@ -643,6 +685,9 @@ In M1 no runner reads media yet: `media_common` is exercised only by its tests.
 | `undefined_metric` | `invalid_request` | a metric with no defined value on the partition (section 19.7) |
 | `invalid_time_series` | `invalid_request` | a timestamp that breaks the rules of section 19.5; a chronological split that leaves a partition empty |
 | `invalid_media` | `invalid_request` | `media_common`: the base64, image header or WAV rules |
+| `pretrained_model_unavailable` | `backend_unavailable` | transformers: the named model is not provisioned under the model root (or the root is unusable) |
+| `pretrained_model_mismatch` | `incompatible_artifact` | transformers: the provisioned files break the manifest rules, or the model's recorded digest changed |
+| `pretrained_label_mismatch` | `invalid_request` | transformers: the dataset's classes are not labels of the pretrained classifier |
 
 `tests/unit/ml-contract.test.ts` checks that the Python sources emit exactly the TypeScript set.
 
@@ -738,8 +783,7 @@ v1 requests keep their meaning, but these differences reach Phase 3 callers:
 
 ### 19.11 Not built in M1
 
-- No backend implements a task other than classification and regression or takes a non-tabular feature column; no runner
-  decodes media or computes the new metrics.
-- `transcription` and its metrics are not defined.
-- Image pixels are decoded only by a later runner that needs them, which re-checks the bounds above.
-- No database migration: the new snapshot fields and the embedding digest fit the existing JSON columns.
+M1 built the vocabulary only. Later milestones add the backends that use it; section 13 lists them as they land. At the end of
+M1, no backend implemented a task other than classification and regression or took a non-tabular feature column, and no runner
+decoded media or computed the new metrics. `transcription` and its metrics are not defined yet. No database migration was
+needed: the new snapshot fields and the embedding digest fit the existing JSON columns.

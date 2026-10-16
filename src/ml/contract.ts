@@ -66,6 +66,10 @@ const RUNNER_CODES: Record<string, MlFailureCategory> = {
   undefined_metric: "invalid_request",
   invalid_time_series: "invalid_request",
   invalid_media: "invalid_request",
+  // Pretrained models under the platform-wide model root (transformers backend).
+  pretrained_model_unavailable: "backend_unavailable",
+  pretrained_model_mismatch: "incompatible_artifact",
+  pretrained_label_mismatch: "invalid_request",
 };
 
 /** Every refusal code a runner may print. The Python runners must emit exactly this set (see the contract unit test). */
