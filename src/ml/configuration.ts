@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { AudioBackend } from "./audio-backend.js";
 import type { MlBackend } from "./backend.js";
 import { LightgbmBackend, XgboostBackend } from "./gbdt-backend.js";
 import { JaxBackend } from "./jax-backend.js";
@@ -30,6 +31,8 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_TRANSFORMERS_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_TRANSFORMERS_PYTHON: z.string().min(1).default(python),
     ML_TRANSFORMERS_MODEL_ROOT: z.string().default(""),
+    ML_AUDIO_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_AUDIO_PYTHON: z.string().min(1).default(python),
   }).parse(env);
   const backends = new Map<string, MlBackend>();
   if (config.ML_ENABLED === "true") {
@@ -44,6 +47,7 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
       if (!isAbsolute(root) || !isDirectory(root)) throw new Error("ML_TRANSFORMERS_MODEL_ROOT must be an absolute path to an existing directory");
       const transformers = new TransformersBackend(config.ML_TRANSFORMERS_PYTHON, root, config.ML_TIMEOUT_MS); backends.set(transformers.id, transformers);
     }
+    if (config.ML_AUDIO_ENABLED === "true") { const audio = new AudioBackend(config.ML_AUDIO_PYTHON, config.ML_TIMEOUT_MS); backends.set(audio.id, audio); }
   }
   return { enabled: config.ML_ENABLED === "true", backends };
 }

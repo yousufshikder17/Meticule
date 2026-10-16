@@ -357,20 +357,20 @@ change.
 
 ## 13. Current implementations
 
-| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM | Transformers |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` | `TransformersBackend` |
-| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` | `transformers-reference-v1` |
-| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) | none (one-shot) |
-| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` |
-| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` |
-| Iterative | no | yes | yes | yes | no | no | no |
-| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `embedding` |
-| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `text`, `image` (exactly one) |
-| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v2 (its snapshots always use non-tabular columns) |
-| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN | none |
-| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) |
-| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` | `tests/conformance/transformers-*.test.ts` (task suite) |
+| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM | Transformers | Audio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` | `TransformersBackend` | `AudioBackend` |
+| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` | `transformers-reference-v1` | `audio-npz-v1` |
+| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) | none (one-shot) | none (one-shot) |
+| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` | `cpu` |
+| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` | `fp32` |
+| Iterative | no | yes | yes | yes | no | no | no | no |
+| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `embedding` | `embedding`, `classification` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `text`, `image` (exactly one) | `audio` (exactly one) |
+| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v2 (its snapshots always use non-tabular columns) | v2 |
+| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN | none | none |
+| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` | `ML_TRANSFORMERS_PYTHON` (+ `ML_TRANSFORMERS_MODEL_ROOT`) | `ML_AUDIO_PYTHON` (the scikit-learn venv) |
+| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` | `tests/conformance/transformers-*.test.ts` (task suite) | `tests/conformance/audio-*.test.ts` (task suite) |
 
 Known CI limit. The test job provides scikit-learn and PyTorch. The TensorFlow job provides only TensorFlow, and it runs the
 TensorFlow conformance file. The pairs involving TensorFlow in `cross-backend.test.ts` therefore run locally when all three
@@ -444,6 +444,30 @@ every provisioned model. Each model is one directory holding the Hugging Face fi
 - **Tests** use tiny random models generated offline (`tests/python/hf_fixtures.py`), including a malicious variant for each
   provisioning rule. They prove the execution path and the safety rules, not semantic quality. Fine-tuning the encoder itself
   (and PEFT/LoRA) is not part of Phase 4.
+
+### 13.3 Audio (Phase 4 M5)
+
+Backend `audio` (NumPy and SciPy only, on the scikit-learn interpreter; CPU, one-shot). One `audio` column of WAV clips that
+passed the media rules of section 19.5.
+
+- **Front end** (`ml/audio_common.py`).
+  - Decoding uses only `media_common`'s chunk walker (never `scipy.io.wavfile`).
+  - Mono by the arithmetic mean of the channels.
+  - Resampled to `sampleRate` with `scipy.signal.resample_poly` over the reduced ratio.
+  - Frames of `frameMs` with hop `hopMs`, a periodic Hann window and `rfft` power.
+  - An HTK mel filterbank of `nMels` bands from 0 Hz to Nyquist, then log(max(energy, 1e-10)).
+  - MFCC via an orthonormal DCT-II keeping `nMfcc` coefficients.
+  - The clip's vector is each coefficient's mean, then each coefficient's standard deviation (length 2 * nMfcc).
+  - One clip at a time.
+- **Models.** `audio_features` (embedding; a fixed transform, nothing is fitted) returns that vector and records
+  `embedding_dimension`. `audio_mfcc_classifier` (classification) standardises the vectors and fits the shared softmax head
+  (`ml/linear_heads.py`) on training rows only. Cross-validation fits a fresh head per fold.
+- **Artifact `audio-npz-v1`.** A NumPy archive read with `allow_pickle=False`: settings, classes and environment as metadata,
+  and the head's arrays with shapes checked against the metadata.
+- **What the checks prove.** Decoder known answers for every PCM width and float32, stereo downmix, and resampling. The shared
+  vector file gives identical verdicts in both languages. MFCC determinism, and the exact amplitude invariance: scaling a
+  broadband clip by a moves only the first coefficient's mean, by 2 ln a * sqrt(nMels). The classifier separates
+  low from high tones and noise from tone. These are signal-processing features, not a learned speech or audio-event model.
 
 ## 14. Framework-neutrality audit
 
