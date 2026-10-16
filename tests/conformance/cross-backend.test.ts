@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { MlBackend, TrainedModel } from "../../src/ml/backend.js";
 import { MlBackendFailure } from "../../src/ml/contract.js";
+import { JaxBackend } from "../../src/ml/jax-backend.js";
 import { PytorchBackend } from "../../src/ml/pytorch-backend.js";
 import { SklearnBackend } from "../../src/ml/sklearn-backend.js";
 import { TensorflowBackend } from "../../src/ml/tensorflow-backend.js";
@@ -13,6 +14,7 @@ import { ROWS, signal, snapshotWith } from "./contract-suite.js";
 const sklearnPython = process.env.ML_TEST_PYTHON ?? "";
 const torchPython = process.env.ML_TEST_PYTORCH_PYTHON ?? "";
 const tensorflowPython = process.env.ML_TEST_TENSORFLOW_PYTHON ?? "";
+const jaxPython = process.env.ML_TEST_JAX_PYTHON ?? "";
 const quick = { epochs: 3, hiddenLayers: [8], batchSize: 16, learningRate: 0.01 };
 const CLASSIFICATION = { algorithm: "mlp_classifier", hyperparameters: quick };
 
@@ -100,5 +102,36 @@ describe.runIf(Boolean(sklearnPython && tensorflowPython))("scikit-learn and Ten
 
     expect(await refusalOf(tensorflow.predict(receiverSnapshot(tensorflow), fromSklearn.model.bytes, ROWS.slice(0, 3), fromSklearn.model.environment, signal()))).toBe("incompatible_artifact");
     expect(await refusalOf(sklearn.predict(receiverSnapshot(sklearn), fromTensorflow.model.bytes, ROWS.slice(0, 3), fromTensorflow.model.environment, signal()))).toBe("incompatible_artifact");
+  }, 600_000);
+});
+
+describe.runIf(Boolean(jaxPython && torchPython))("JAX and PyTorch refuse each other's artifacts and checkpoints", () => {
+  it("refuses an artifact and a checkpoint across the two frameworks, which register the same model ids", async () => {
+    const jax = new JaxBackend(jaxPython);
+    const torch = new PytorchBackend(torchPython);
+    const fromJax = await trainedArtifact(jax, "mlp_classifier", CLASSIFICATION.hyperparameters);
+    const fromTorch = await trainedArtifact(torch, "mlp_classifier", CLASSIFICATION.hyperparameters);
+    expect(await refusalOf(torch.predict(receiverSnapshot(torch), fromJax.model.bytes, ROWS.slice(0, 3), fromJax.model.environment, signal()))).toBe("incompatible_artifact");
+    expect(await refusalOf(jax.predict(receiverSnapshot(jax), fromTorch.model.bytes, ROWS.slice(0, 3), fromTorch.model.environment, signal()))).toBe("incompatible_artifact");
+
+    const snapJax = snapshotWith("jax", CLASSIFICATION, "classification"), snapTorch = snapshotWith("pytorch", CLASSIFICATION, "classification");
+    const pJax = await jax.prepare(snapJax, ROWS, signal()), pTorch = await torch.prepare(snapTorch, ROWS, signal());
+    const jaxChunk = await jax.trainChunk!(snapJax, ROWS, pJax, null, 1, signal());
+    const torchChunk = await torch.trainChunk!(snapTorch, ROWS, pTorch, null, 1, signal());
+    const categories = [await refusalOf(torch.trainChunk!(snapTorch, ROWS, pTorch, jaxChunk.checkpoint, 1, signal())),
+      await refusalOf(jax.trainChunk!(snapJax, ROWS, pJax, torchChunk.checkpoint, 1, signal()))];
+    for (const category of categories) expect(["invalid_checkpoint", "incompatible_checkpoint"]).toContain(category);
+    expect(await refusalOf(jax.trainChunk!(snapJax, ROWS, pJax, randomBytes(128), 1, signal()))).toBe("invalid_checkpoint");
+  }, 600_000);
+});
+
+describe.runIf(Boolean(sklearnPython && jaxPython))("scikit-learn and JAX refuse each other's artifacts", () => {
+  it("refuses a scikit-learn artifact in JAX and a JAX artifact in scikit-learn", async () => {
+    const sklearn = new SklearnBackend(sklearnPython);
+    const jax = new JaxBackend(jaxPython);
+    const fromSklearn = await trainedArtifact(sklearn, "logistic_regression", {});
+    const fromJax = await trainedArtifact(jax, "mlp_classifier", CLASSIFICATION.hyperparameters);
+    expect(await refusalOf(jax.predict(receiverSnapshot(jax), fromSklearn.model.bytes, ROWS.slice(0, 3), fromSklearn.model.environment, signal()))).toBe("incompatible_artifact");
+    expect(await refusalOf(sklearn.predict(receiverSnapshot(sklearn), fromJax.model.bytes, ROWS.slice(0, 3), fromJax.model.environment, signal()))).toBe("incompatible_artifact");
   }, 600_000);
 });

@@ -95,3 +95,40 @@ jobs:
       - run: npx vitest run tests/unit/ml-tensorflow.test.ts tests/unit/ml-tensorflow-runner.test.ts tests/integration/ml-tensorflow.test.ts tests/conformance/tensorflow.test.ts
         env:
           CI: "true"
+
+  # Separate from `test`: JAX is optional at runtime. This job runs the real JAX runner (CPU jaxlib only), its catalog, its
+  # conformance file and its durable lifecycle. The `test` job skips those tests, because ML_TEST_JAX_PYTHON is not set there.
+  jax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+          POSTGRES_DB: agent_platform
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agent -d agent_platform"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://agent:agent@localhost:5432/agent_platform
+      TEST_DATABASE_URL: postgres://agent:agent@localhost:5432/agent_platform
+      ML_JAX_JOB: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, cache: npm }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: "3.13", cache: pip, cache-dependency-path: ml/requirements-jax.txt }
+      - name: Install pinned JAX requirements (CPU only)
+        run: |
+          python -m venv "$RUNNER_TEMP/jax-venv"
+          "$RUNNER_TEMP/jax-venv/bin/python" -m pip install -r ml/requirements-jax.txt
+          echo "ML_TEST_JAX_PYTHON=$RUNNER_TEMP/jax-venv/bin/python" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm run db:migrate
+      - run: npx vitest run tests/unit/ml-jax.test.ts tests/unit/ml-jax-runner.test.ts tests/integration/ml-jax.test.ts tests/conformance/jax.test.ts
+        env:
+          CI: "true"

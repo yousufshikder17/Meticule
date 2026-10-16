@@ -284,7 +284,7 @@ Adding an internal backend is a narrow path:
    `cross-backend.test.ts`.
 
 Nothing else changes. Persistence, the processor, the registry, evaluation, routing and the HTTP layer are backend-blind.
-Section 14 records the JAX thought experiment that tests this claim.
+Section 16 records the JAX backend, which put this claim to the test.
 
 Not allowed: a public plugin loader, executing third-party code from a configuration value, or a backend that persists its own
 state.
@@ -357,20 +357,20 @@ change.
 
 ## 13. Current implementations
 
-| | scikit-learn | PyTorch | TensorFlow |
-| --- | --- | --- | --- |
-| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` |
-| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` |
-| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` |
-| Devices | `cpu` | `cpu`, `cuda` | `cpu` |
-| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` |
-| Iterative | no | yes | yes |
-| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` |
-| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` |
-| Contracts accepted | v1, v2 | v1, v2 | v1, v2 |
-| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations |
-| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` |
-| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` |
+| | scikit-learn | PyTorch | TensorFlow | JAX |
+| --- | --- | --- | --- | --- |
+| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` |
+| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` |
+| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` |
+| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` |
+| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` |
+| Iterative | no | yes | yes | yes |
+| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` |
+| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 |
+| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations |
+| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` |
+| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` |
 
 Known CI limit. The test job provides scikit-learn and PyTorch. The TensorFlow job provides only TensorFlow, and it runs the
 TensorFlow conformance file. The pairs involving TensorFlow in `cross-backend.test.ts` therefore run locally when all three
@@ -421,27 +421,28 @@ What the v1 contract already accommodates, what a new optional capability would 
 **What required contract v2:** non-tabular inputs, which v2 carries as typed cells in the same JSON rows (section 19). **What would
 still need a new version:** a remote or distributed execution transport; a training loop that is not expressed as epochs over rows.
 
-## 16. Adding JAX (thought experiment only)
+## 16. JAX backend (Phase 4 M2)
 
-JAX was used as a design test. Nothing was installed or implemented.
+The thought experiment that stood here is now an implementation, and it held: adding JAX touched no persistence, processor,
+registry, evaluation or HTTP code. It needed a runner (`ml/jax_runner.py`), a requirements file
+(`ml/requirements-jax.txt`), model definitions (`src/ml/jax-models.ts`, the shared `mlpDefinitions` under `jax`), a backend
+class, a configuration entry (`ML_JAX_ENABLED`, `ML_JAX_PYTHON`) and tests.
 
-A JAX backend would need, following section 10:
-
-- a Python runner that implements the six commands with JAX computation and calls `serve`;
-- a JAX requirements file;
-- a set of model definitions and a device list, and a capability declaration (`jax` would likely be `cpu`, with GPU as an
-  explicit device when a CUDA-enabled install is present);
-- a backend class, a configuration entry and a conformance file.
-
-It would not require edits to persistence, the training processor, the registry, evaluation, routing, the HTTP layer or unrelated
-core code. Its checkpoint would be an opaque, versioned format; its artifact would be an opaque, versioned format. Those are the
-two things the platform never inspects.
-
-The honest caveat is that JAX's functional state (parameters and optimizer state held as pytrees) fits the checkpoint format
-without change, but its random-number handling is explicit in a way the current runners do not exercise, so the determinism check
-would need a JAX-specific expectation. That is a difference in the backend, expressed as a check, not a contract change.
-
-Conclusion: the architecture is healthy for this case.
+- **Real JAX.** The network, `jax.value_and_grad` and a `jax.jit` training step are JAX. sgd, adam and adamw (decoupled weight
+  decay 0.01; PyTorch's constants) are hand-written pure functions over parameter and optimizer-state pytrees. A check compares
+  the gradients with central finite differences of an independent float64 NumPy implementation.
+- **Explicit randomness.** `key(seed)` splits into init, shuffle and dropout keys. Epoch `e` shuffles with
+  `fold_in(shuffle, e)`, and batch `b` of epoch `e` drops out with `fold_in(fold_in(dropout, e), b)`. No random state is carried
+  between chunks, so chunked training equals an uninterrupted run bit for bit. The checkpoint records the base key data, and a
+  restore refuses key data that does not derive from the snapshot seed.
+- **Formats.** `jax-params-v1` and `jax-checkpoint-v1` are NumPy archives read with `allow_pickle=False`. The names and shapes of
+  every array follow from the recorded architecture (which is itself re-checked against the allowlist). Each entry's size is
+  checked before it is decompressed. Non-finite parameters, extra arrays and object arrays are refused. Checkpoints carry the
+  parameters, adam moments and step count, and the best-epoch parameters.
+- **Devices.** CPU and fp32 only. `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=0` and single-threaded XLA flags are assigned before
+  JAX is imported. There is no CUDA jaxlib for native Windows; a CUDA request is refused as `cuda_unsupported` and any other
+  device or precision as `unsupported_device_or_precision` (the TensorFlow runner's codes). The environment records
+  `jax_platform` and `jax_devices` as provenance. No GPU capability is claimed.
 
 ## 17. Deferred
 
