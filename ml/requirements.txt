@@ -3,3 +3,8 @@ numpy==2.3.3
 scipy==1.16.2
 joblib==1.5.2
 threadpoolctl==3.6.0
+# pandas (and its pinned dependencies) for the LightGBM runtime and the forecasting backend. The scikit-learn runner never imports it.
+pandas==3.0.6
+python-dateutil==2.9.0.post0
+six==1.17.0
+tzdata==2026.5

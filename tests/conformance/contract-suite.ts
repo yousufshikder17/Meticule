@@ -12,6 +12,7 @@ import { snapshotFor } from "../unit/ml-fixtures.js";
 import "../../src/ml/pytorch-models.js";
 import "../../src/ml/tensorflow-models.js";
 import "../../src/ml/jax-models.js";
+import "../../src/ml/gbdt-models.js";
 
 /**
  * Meticule ML Backend Contract v1 conformance. One suite, written once against the platform semantics, runs against every

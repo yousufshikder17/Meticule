@@ -91,14 +91,14 @@ def fit_numeric(operations, values):
     return states
 
 
-def apply_numeric(states, values):
+def apply_numeric(states, values, allow_missing=False):
     arr = np.array([np.nan if v is None else float(v) for v in values], dtype=float)
     for state in states:
         if state["op"] in IMPUTERS:
             arr = np.where(np.isnan(arr), state["fill"], arr)
         else:
             arr = (arr - state["center"]) / state["spread"]
-    if np.isnan(arr).any():
+    if not allow_missing and np.isnan(arr).any():
         raise ValueError("Missing numeric value reached the neural model; add an imputer to the pipeline")
     return arr.reshape(-1, 1)
 
@@ -157,11 +157,15 @@ def fit_preprocessing(spec, rows, fit_indices):
     return {"columns": columns}
 
 
-def transform(preprocessing, rows):
+def transform(preprocessing, rows, missing="error"):
+    """`missing="nan"` lets a missing number with no imputer through as NaN, for models that handle it natively (gradient
+    boosting). The default keeps the neural runners' refusal; the fitted state and its format are the same either way."""
+    if missing not in ("error", "nan"):
+        raise ValueError("Unknown missing-value policy")
     blocks = []
     for column in preprocessing["columns"]:
         values = [row[column["feature"]] for row in rows]
-        blocks.append(apply_numeric(column["states"], values) if column["kind"] == "number" else apply_categorical(column["states"], values))
+        blocks.append(apply_numeric(column["states"], values, missing == "nan") if column["kind"] == "number" else apply_categorical(column["states"], values))
     if not blocks:
         return np.zeros((len(rows), 0), dtype=np.float32)
     return np.hstack(blocks).astype(np.float32)

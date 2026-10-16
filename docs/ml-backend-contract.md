@@ -357,26 +357,51 @@ change.
 
 ## 13. Current implementations
 
-| | scikit-learn | PyTorch | TensorFlow | JAX |
-| --- | --- | --- | --- | --- |
-| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` |
-| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` |
-| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` |
-| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` |
-| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` |
-| Iterative | no | yes | yes | yes |
-| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` |
-| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` |
-| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 |
-| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations |
-| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` |
-| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` |
+| | scikit-learn | PyTorch | TensorFlow | JAX | XGBoost | LightGBM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Class | `SklearnBackend` | `PytorchBackend` | `TensorflowBackend` | `JaxBackend` | `XgboostBackend` | `LightgbmBackend` |
+| Artifact format | `sklearn-pickle-v1` | `pytorch-state-dict-v1` | `tensorflow-variables-v1` | `jax-params-v1` | `xgboost-json-v1` | `lightgbm-text-v1` |
+| Checkpoint format | none (one-shot) | `pytorch-checkpoint-v1` | `tensorflow-checkpoint-v1` | `jax-checkpoint-v1` | none (one-shot) | none (one-shot) |
+| Devices | `cpu` | `cpu`, `cuda` | `cpu` | `cpu` | `cpu` | `cpu` |
+| Precisions | `fp32` | `fp32`, `mixed` (CUDA only) | `fp32` | `fp32` | `fp32` | `fp32` |
+| Iterative | no | yes | yes | yes | no | no |
+| Tasks | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` | `classification`, `regression` |
+| Feature column types | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` | `number`, `string`, `boolean` |
+| Contracts accepted | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 | v1, v2 |
+| Preprocessing | eight operations, including `variance_threshold` | seven numeric and categorical operations | seven numeric and categorical operations | seven numeric and categorical operations | the same seven; missing numbers pass through as NaN | the same seven; missing numbers pass through as NaN |
+| Interpreter variable | `ML_PYTHON` | `ML_PYTORCH_PYTHON` | `ML_TENSORFLOW_PYTHON` | `ML_JAX_PYTHON` | `ML_XGBOOST_PYTHON` | `ML_LIGHTGBM_PYTHON` |
+| Conformance file | `tests/conformance/sklearn.test.ts` | `tests/conformance/pytorch.test.ts` | `tests/conformance/tensorflow.test.ts` | `tests/conformance/jax.test.ts` | `tests/conformance/xgboost.test.ts` | `tests/conformance/lightgbm.test.ts` |
 
 Known CI limit. The test job provides scikit-learn and PyTorch. The TensorFlow job provides only TensorFlow, and it runs the
 TensorFlow conformance file. The pairs involving TensorFlow in `cross-backend.test.ts` therefore run locally when all three
 interpreters are configured, not in hosted CI. Similarly, `tests/integration/ml-matrix.test.ts` (the Phase 3E matrix) needs all three
 interpreters and is not run by either CI job. Closing this needs one venv that hosts all three frameworks, which is a CI design
 change and is not made in this phase.
+
+### 13.1 Gradient boosting (Phase 4 M3)
+
+XGBoost and LightGBM run through their native APIs (`xgb.train` on a `DMatrix`, `lgb.train` on a `Dataset`), never through
+scikit-learn wrappers. `ml/gbdt_common.py` holds what the two runners share; each runner supplies only its framework's
+parameter mapping, fit, raw prediction and model text. Preprocessing is the neural runners' JSON-state NumPy implementation,
+fitted on training rows only. Missing numbers with no imputer pass through as NaN (`transform(..., missing="nan")`; the neural
+default still refuses them), and both frameworks route NaN natively.
+
+- **Artifacts.** `xgboost-json-v1` is the booster's own JSON (`save_raw("json")`). `lightgbm-text-v1` is its text model
+  (`model_to_string`). Each sits in a JSON envelope `{metadata, model}`; the envelope keys, environment and metadata are checked
+  before the framework parses any model text. No pickle. Runtime keys: the framework version plus the numeric stack; LightGBM
+  also records `pandas`, which its forecasting model uses.
+- **Determinism.** Fixed seeds, one thread, histogram trees (XGBoost); `deterministic`, `force_row_wise` (LightGBM). The same
+  seed and split give a byte-identical model.
+- **Framework-native early stopping is not Meticule's training policy.** `early_stopping_rounds` (0 = off, at most 200) monitors
+  the validation partition. That partition only picks the stopping point; it never fits preprocessing or trees. The number of
+  trees used is recorded as `best_iteration` (resolved hyperparameters) and `bestIteration` (performance), and every later
+  prediction uses exactly that many: XGBoost cuts prediction at the count, and LightGBM saves only those trees. Both backends are
+  one-shot for Meticule (`iterative: false`, no checkpoints): a Meticule training policy is refused, and recovery after a crash
+  is Meticule retrying the attempt from scratch. Early stopping inside cross-validation is refused, not silently disabled,
+  because a fold has no separate monitoring partition.
+- **Bounds.** snake_case hyperparameters, bounded in the catalog and enforced again by the runner. Unknown names are refused,
+  never forwarded to the framework.
+- **Devices.** CPU only. CUDA is refused as `cuda_unsupported`.
 
 ## 14. Framework-neutrality audit
 

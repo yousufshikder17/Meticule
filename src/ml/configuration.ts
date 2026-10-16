@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { MlBackend } from "./backend.js";
+import { LightgbmBackend, XgboostBackend } from "./gbdt-backend.js";
 import { JaxBackend } from "./jax-backend.js";
 import { PytorchBackend } from "./pytorch-backend.js";
 import { SklearnBackend } from "./sklearn-backend.js";
@@ -18,6 +19,10 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_TENSORFLOW_PYTHON: z.string().min(1).default(python),
     ML_JAX_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_JAX_PYTHON: z.string().min(1).default(python),
+    ML_XGBOOST_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_XGBOOST_PYTHON: z.string().min(1).default(python),
+    ML_LIGHTGBM_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_LIGHTGBM_PYTHON: z.string().min(1).default(python),
   }).parse(env);
   const backends = new Map<string, MlBackend>();
   if (config.ML_ENABLED === "true") {
@@ -25,6 +30,8 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     if (config.ML_PYTORCH_ENABLED === "true") { const torch = new PytorchBackend(config.ML_PYTORCH_PYTHON, config.ML_TIMEOUT_MS); backends.set(torch.id, torch); }
     if (config.ML_TENSORFLOW_ENABLED === "true") { const tensorflow = new TensorflowBackend(config.ML_TENSORFLOW_PYTHON, config.ML_TIMEOUT_MS); backends.set(tensorflow.id, tensorflow); }
     if (config.ML_JAX_ENABLED === "true") { const jax = new JaxBackend(config.ML_JAX_PYTHON, config.ML_TIMEOUT_MS); backends.set(jax.id, jax); }
+    if (config.ML_XGBOOST_ENABLED === "true") { const xgboost = new XgboostBackend(config.ML_XGBOOST_PYTHON, config.ML_TIMEOUT_MS); backends.set(xgboost.id, xgboost); }
+    if (config.ML_LIGHTGBM_ENABLED === "true") { const lightgbm = new LightgbmBackend(config.ML_LIGHTGBM_PYTHON, config.ML_TIMEOUT_MS); backends.set(lightgbm.id, lightgbm); }
   }
   return { enabled: config.ML_ENABLED === "true", backends };
 }

@@ -1,0 +1,5 @@
+# XGBoost and LightGBM backends (Phase 4). CPU only: the backends declare only cpu and train with one thread.
+# The pins match the verified environment. pandas comes from requirements.txt (the LightGBM runtime records it).
+-r requirements.txt
+xgboost==3.4.1
+lightgbm==4.7.0

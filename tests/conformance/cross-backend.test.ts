@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { MlBackend, TrainedModel } from "../../src/ml/backend.js";
 import { MlBackendFailure } from "../../src/ml/contract.js";
+import { LightgbmBackend, XgboostBackend } from "../../src/ml/gbdt-backend.js";
 import { JaxBackend } from "../../src/ml/jax-backend.js";
 import { PytorchBackend } from "../../src/ml/pytorch-backend.js";
 import { SklearnBackend } from "../../src/ml/sklearn-backend.js";
@@ -15,6 +16,7 @@ const sklearnPython = process.env.ML_TEST_PYTHON ?? "";
 const torchPython = process.env.ML_TEST_PYTORCH_PYTHON ?? "";
 const tensorflowPython = process.env.ML_TEST_TENSORFLOW_PYTHON ?? "";
 const jaxPython = process.env.ML_TEST_JAX_PYTHON ?? "";
+const gbdtPython = process.env.ML_TEST_XGBOOST_PYTHON ?? "";
 const quick = { epochs: 3, hiddenLayers: [8], batchSize: 16, learningRate: 0.01 };
 const CLASSIFICATION = { algorithm: "mlp_classifier", hyperparameters: quick };
 
@@ -31,9 +33,9 @@ async function refusalOf(promise: Promise<unknown>): Promise<string> {
  * artifact can only reach another runner under a snapshot that names that runner. The runner must still refuse it.
  */
 function receiverSnapshot(backend: MlBackend) {
-  return backend.id === "sklearn"
-    ? snapshotWith("sklearn", { algorithm: "logistic_regression", hyperparameters: {} }, "classification")
-    : snapshotWith(backend.id, CLASSIFICATION, "classification");
+  if (backend.id === "sklearn") return snapshotWith("sklearn", { algorithm: "logistic_regression", hyperparameters: {} }, "classification");
+  if (backend.id === "xgboost" || backend.id === "lightgbm") return snapshotWith(backend.id, { algorithm: `${backend.id}_classifier`, hyperparameters: { n_estimators: 5 } }, "classification");
+  return snapshotWith(backend.id, CLASSIFICATION, "classification");
 }
 
 /** Trains one attempt with a backend; its artifact and recorded environment are what another backend is handed. */
@@ -133,5 +135,18 @@ describe.runIf(Boolean(sklearnPython && jaxPython))("scikit-learn and JAX refuse
     const fromJax = await trainedArtifact(jax, "mlp_classifier", CLASSIFICATION.hyperparameters);
     expect(await refusalOf(jax.predict(receiverSnapshot(jax), fromSklearn.model.bytes, ROWS.slice(0, 3), fromSklearn.model.environment, signal()))).toBe("incompatible_artifact");
     expect(await refusalOf(sklearn.predict(receiverSnapshot(sklearn), fromJax.model.bytes, ROWS.slice(0, 3), fromJax.model.environment, signal()))).toBe("incompatible_artifact");
+  }, 600_000);
+});
+
+describe.runIf(Boolean(sklearnPython && gbdtPython))("scikit-learn, XGBoost and LightGBM refuse each other's artifacts", () => {
+  it("refuses every foreign artifact among the three tree frameworks", async () => {
+    const backends = [new SklearnBackend(sklearnPython), new XgboostBackend(gbdtPython), new LightgbmBackend(gbdtPython)];
+    const algorithms: Record<string, string> = { sklearn: "random_forest_classifier", xgboost: "xgboost_classifier", lightgbm: "lightgbm_classifier" };
+    const trained = new Map<string, TrainedModel>();
+    for (const backend of backends) trained.set(backend.id, (await trainedArtifact(backend, algorithms[backend.id]!, backend.id === "sklearn" ? {} : { n_estimators: 5 })).model);
+    for (const receiver of backends) for (const [source, model] of trained) {
+      if (source === receiver.id) continue;
+      expect(await refusalOf(receiver.predict(receiverSnapshot(receiver), model.bytes, ROWS.slice(0, 3), model.environment, signal())), `${source} -> ${receiver.id}`).toBe("incompatible_artifact");
+    }
   }, 600_000);
 });
