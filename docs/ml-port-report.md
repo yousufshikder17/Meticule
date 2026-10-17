@@ -169,3 +169,183 @@ The production build passes. `tsc --noEmit` reports the identical 22 diagnostics
 - Real CUDA execution: PyTorch was a CPU build, so the CUDA checks took their explicit `device_unavailable` refusal branch.
 - The hosted GitHub Actions workflow was not run from this machine.
 - The Phase 3E matrix and the cross-backend pairs that include TensorFlow run only where all three frameworks are installed together. They passed locally and are not part of hosted CI.
+
+# ML Phase 4 (M1–M9) public port review
+
+The port comes from private revision `85f81bf`, the verified end of Phase 4 (M1–M9). The private report for that revision records 846 passing tests and 3 CI-only skips, with no hosted CI or GPU run. Those are private results; the public results are below.
+
+The public base was `1b4118f`, which already contained the Phase 3 port and the public endpoint-monitoring commit. The checkout was clean, so no local work had to be set aside. The private repository was read-only throughout.
+
+The method was the same as for Phase 3, applied per milestone:
+
+- Every private file changed in the milestone was translated to public names: `ml/*_runner.py`, `ml/requirements.txt`, `docs/ml.md`, `authorizeMl`, `tenant_admin` and public `monitoring()`.
+- Each file was then three-way merged against the private revision before that milestone, so the public adaptations survived. Conflicts were resolved by hand.
+- New integration tests were moved from the filesystem artifact store to `PostgresArtifactStore`.
+- Each milestone was typechecked, and its unit and integration files were run before it was committed.
+
+The translation missed two runner names. Tests and the leakage scan found them, and they are fixed (see below).
+
+## Classification
+
+| Capability | Classification | Public disposition |
+| --- | --- | --- |
+| Contract v2 and vocabulary (M1): the task registry, `text`/`timestamp`/`image`/`audio` columns, media and timestamp validation in both languages, the metric registry and refusal codes | PUBLIC-CORE | Ported. v1 requests keep their meaning |
+| Native JAX MLPs with durable chunked training (M2) | PUBLIC-CORE | Ported, CPU only |
+| Native XGBoost and LightGBM (M3) | PUBLIC-CORE | Ported |
+| Hugging Face Transformers for text and vision (M4); wav2vec2 audio classification and CTC speech recognition (M8) | PUBLIC-CORE | Ported. The manifest, hash, allowlist, offline and `trust_remote_code=False` rules are unchanged |
+| NumPy/SciPy audio features (M5) | PUBLIC-CORE | Ported |
+| pgvector embedding indexes and similarity, migration 007 (M6) | PUBLIC-ADAPTATION | Routes use the public request-scoped store. Writes need `tenant_admin`; members read and search. A new public JWT/RLS HTTP test covers this |
+| Forecasting, the LightGBM forecaster and anomaly detection (M7) | PUBLIC-CORE | Ported |
+| Artifacts and checkpoints for every new backend | PUBLIC-ADAPTATION | Kept in PostgreSQL `ml_blobs` at 16 MB per blob, unchanged. Oversized artifacts fail as `output_limit_exceeded` |
+| `ML_TRANSFORMERS_MODEL_ROOT` | PUBLIC-CORE | Kept. It is a read-only library of operator-provisioned models, not artifact storage, and must be an existing absolute directory at startup |
+| Configuration | PUBLIC-ADAPTATION | One flag pair per backend, with the public platform-aware default interpreter (`python` or `python3`) |
+| CI, `.env.example`, packaging and docs (M9) | PUBLIC-ADAPTATION | See below |
+| Private roles, the filesystem artifact store, `ML_ARTIFACT_ROOT` and the private `monitor()` route | PRIVATE-ONLY | Not ported (as in Phases 2 and 3) |
+| Private planning and verification documents: `phase-4-handoff.md`, `phase-4-report.md`, `ml-platform.md`, `ml-experiments.md` | PRIVATE-ONLY | Not copied. The public facts are written into `docs/ml.md` |
+| Managed GPU fleets, hosted orchestration and enterprise governance | — | Not present in private Phase 4 either, so there was nothing to exclude |
+
+Nothing was deferred: every implemented Phase 4 capability is ported.
+
+## Public-specific changes
+
+- **Embedding routes.** `src/ml/embedding-routes.ts` builds `new PostgresArtifactStore(c.get("database"))` per request, like the other public ML routes.
+- **Configuration.** `src/ml/configuration.ts` keeps the public style and default interpreter.
+- **Embedding HTTP test.** `tests/integration/ml-embeddings.test.ts` adds a test through signed JWT membership:
+  - a member gets 403 on create and build, and 200 on search and similarity;
+  - another tenant gets 404 on get, search and similarity, and an empty list.
+- **Monitoring assertions.** Private `monitor()` assertions map to public `monitoring()`, with `failures` renamed to `failed`.
+- **Roles in tests.** A private-style viewer becomes a member with no roles.
+- **Legacy guard.** `tests/python/legacy/phase3_neural/` holds frozen copies of `ml/pytorch_runner.py` and `ml/neural_common.py` from public `1b4118f`, checked against their public blob ids, so the compatibility guard tests the public Phase 3 runner.
+- **Anomaly check import.** `tests/python/check_anomaly.py` imports the scikit-learn runner through the `ml_backend` alias in public `support.py`.
+- **Packaging.** `package.json` ships `ml/*.py` and `ml/*.txt` instead of the whole `ml/` directory. Local `__pycache__` therefore no longer reaches the tarball, which was previously a manual cleanup step. It also adds `docs/ml-backend-contract.md`, which `docs/ml.md` links to.
+- **Runner names.** Two names left over from the private sources were fixed: the runner path in the GBDT check and the runner path in the forecasting conformance fixture.
+
+## Capability matrix (public)
+
+| Backend | Models | Tasks | Inputs | Device | Artifact | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| scikit-learn | Phase 2 catalog, plus isolation forest, LOF and robust covariance | classification, regression, anomaly detection | tabular | CPU | `sklearn-pickle-v1` (anomaly: schema 2) | Implemented and verified |
+| PyTorch (Phase 3) | `mlp_classifier`, `mlp_regressor` | classification, regression | tabular | CPU; CUDA when requested | `pytorch-state-dict-v1` | CPU verified; CUDA not hardware-verified |
+| TensorFlow/Keras (Phase 3) | `mlp_classifier`, `mlp_regressor` | classification, regression | tabular | CPU | `tensorflow-variables-v1` | Implemented and verified |
+| JAX | `mlp_classifier`, `mlp_regressor` | classification, regression | tabular | CPU (CUDA refused by design) | `jax-params-v1` / `jax-checkpoint-v1` | Implemented and verified |
+| XGBoost | classifier, regressor | classification, regression | tabular; missing numbers as NaN | CPU | `xgboost-json-v1` | Implemented and verified |
+| LightGBM | classifier, regressor, forecaster | classification, regression, forecasting | tabular; timestamp for the forecaster | CPU | `lightgbm-text-v1` | Implemented and verified |
+| Transformers | text, image and audio classifiers; text and image embedders; two frozen-encoder heads; speech recognizer | classification, embedding, transcription | one text, image or audio column | CPU, fp32 | `transformers-reference-v1` | Execution path verified with tiny offline models; real-model quality not measured |
+| Audio | `audio_features`, `audio_mfcc_classifier` | embedding, classification | one audio column | CPU | `audio-npz-v1` | Implemented and verified |
+| Forecasting | seasonal naive, ridge | forecasting (univariate) | timestamp and numeric target | CPU | `forecast-npz-v1` | Implemented and verified |
+| Embedding indexes | (any embedding endpoint) | exact search, pairwise similarity | embedding endpoint rows | PostgreSQL/pgvector | none (vectors in tables) | Implemented and verified |
+
+Not supported by design:
+
+- encoder fine-tuning and PEFT/LoRA;
+- beam search;
+- multivariate or covariate forecasting;
+- approximate vector indexes;
+- model downloads;
+- GPU execution for the Phase 4 backends.
+
+## Migration evidence
+
+**Fresh database.** Migrations `001`–`007` applied from empty, and `db:check` reported 7 of 7. The number 007 was free in the public chain. The migration depends only on objects the chain already provides: `durable_agent_api`, `reject_evaluation_evidence_update` and the `vector` extension created in 001.
+
+**Populated upgrade.** The public Phase 3 code (`1b4118f`) first built a database with migrations 001–006 and left it in this state:
+
+- a real scikit-learn ridge model, trained, registered, promoted and served (x = 10 predicts 21.010737758030174);
+- a real PyTorch job with an epoch-2 checkpoint whose lease expired, recovered to QUEUED.
+
+The database was then migrated to 007 and checked with the Phase 4 code. All five checks passed:
+
+- the row counts of all 18 ML tables were unchanged;
+- the embedding tables were empty;
+- the Phase 3 endpoint returned the identical prediction;
+- the Phase 3 checkpoint resumed from epoch 2 to completion, with epochs 1–6 each recorded once;
+- the resumed model registered and served.
+
+`db:check` reported 7 of 7.
+
+## Verification
+
+**Baseline before the port** (public `1b4118f`, fresh database, migrations 001–006, every real-framework interpreter set, one file per process, sequentially):
+
+- 61 files: 435 passed, 2 failed, 1 skipped.
+- The two failures were 15-second hook and test timeouts in `ml-durable.test.ts`, caused by port work running alongside. Re-run alone, that file passed 10 of 10.
+- The skip is the CI-only TensorFlow runtime check.
+- The effective baseline is therefore 437 passed plus 1 CI-only skip, which matches the 438 recorded after Phase 3.
+- `tsc --noEmit` reported 22 diagnostics, all in unrelated test files.
+
+**After the port** (final `main`, fresh database, migrations 001–007, every interpreter set, one file per process, sequentially): 101 files, 855 passed, 0 failed, 4 skipped.
+
+| Suite | Files | Passed | Skipped |
+| --- | ---: | ---: | ---: |
+| Conformance (all backends, the three anomaly detectors, audio, forecasting, eight Transformers models, cross-backend) | 23 | 432 | 0 |
+| ML integration (lifecycle, durable, devices, compatibility, CV, experiments and their authorization, matrix, PyTorch, TensorFlow, JAX, GBDT, Transformers, audio, forecasting, embeddings) | 16 | 106 | 0 |
+| Non-ML integration | 17 | 106 | 0 |
+| ML unit (including the real-framework check scripts) | 32 | 161 | 4 |
+| Non-ML unit | 13 | 50 | 0 |
+
+- **Skips.** The four skips are CI-only runtime-pin checks (TensorFlow, JAX, XGBoost/LightGBM, Transformers). They run only inside their own CI jobs. Every real-framework test ran.
+- **Exit codes.** One file, `ml-embeddings.test.ts`, passed 6 of 6 but exited 1. The cause was the pre-existing tinypool worker-teardown error (`emitter.removeListener is not a function`) after its tests finished. Re-run alone, it passed 6 of 6 with exit code 0. Every other file exited 0.
+- **Phase 1–3 regression.** All Phase 1–3 tests still pass, including:
+  - the unmodified Phase 1 adapter artifact;
+  - Phase 3 PyTorch artifacts and checkpoints written by a frozen copy of the public Phase 3 runner (`ml-legacy-neural`).
+- **Build and types.** The production build passes. `tsc --noEmit` reports the same 22 diagnostics as the baseline after normalizing source locations, and none in ML files.
+
+**Interpreters** (local venvs with the pinned requirements; Python 3.13.12 unless noted):
+
+| Interpreter | Packages |
+| --- | --- |
+| scikit-learn, audio and forecasting | scikit-learn 1.7.2, NumPy 2.3.3, SciPy 1.16.2, pandas 3.0.6 |
+| PyTorch | Python 3.14, torch 2.9.1 CPU |
+| TensorFlow | TensorFlow 2.20.0, Keras 3.15.1 |
+| JAX | jax and jaxlib 0.11.2 |
+| GBDT | XGBoost 3.4.1, LightGBM 4.7.0 |
+| Transformers | torch 2.9.1 CPU, transformers 5.17.0 |
+
+Transformers tests used tiny random models generated offline; nothing was downloaded.
+
+## CI and packaging
+
+- **CI coverage.** The CI workflow keeps the public `test` job and adds `jax`, `gbdt` and `transformers` jobs beside `tensorflow`. Every Phase 4 conformance file is listed in a job, or runs in `test` through `npm test` with the interpreter that job sets. This includes the LightGBM forecaster and the scikit-learn/GBDT cross-backend pairs, which the private M9 review had found missing.
+- **CI-only pairs.** Cross-backend pairs that need TensorFlow, JAX or Transformers together with another framework run only locally, because CI has no shared environment for them. The same applies to the Transformers text-embedder index test.
+- **Package contents.** `npm pack --dry-run` lists all 17 Python modules and 6 requirements files under `ml/`, all 7 migrations, `docs/ml.md` and `docs/ml-backend-contract.md`. It contains no tests, no `__pycache__`, no venvs and no environment files.
+- **Installation.** Self-hosted installs run the API and worker from the package root, because the backends resolve `ml/*_runner.py` relative to the working directory. Optional dependencies stay optional: with a backend disabled, its models report `available: false` and requests for them are refused.
+- **Docker.** The Docker image remains Node-only. Containerized ML still needs operator-provided Python environments, as documented.
+
+## Security and compatibility review
+
+One focused review covered the public-specific trust boundaries. It found no high or medium issues.
+
+Checked and clean:
+
+- **Tenant isolation.** Every embedding SQL statement filters by tenant and runs on the request's tenant session (`SET LOCAL ROLE durable_agent_api`), and artifact reads are bound to the caller's tenant.
+- **Authorization.** Writes need `tenant_admin`, and reads call `authorizeMl`. No private roles appear in `src`.
+- **Model loading.** Model names are pattern-checked and must resolve directly under the root. Only allowlisted files are loaded, links and `auto_map` are refused, and files are copied while hashing. Loading uses `local_files_only`, `trust_remote_code=False` and offline mode. The model root is never recorded.
+- **Deserialization.** No pickle is used except the existing scikit-learn format. NumPy archives are loaded with `allow_pickle=False`, boosted trees are JSON or text, and PyTorch uses `weights_only=True`.
+- **Failure text.** Failure records hold only Meticule-written text.
+- **Configuration.** Startup refuses a relative or missing model root.
+
+Low findings:
+
+- **Commit messages** named the private source and one private hash. The nine local commits were reworded before they reached `main`. The trees are identical.
+- **Media row caps.** Index builds (256 rows per step) and pairwise similarity (up to 64 x 64) are not held to the per-request media row caps that prediction uses. Batched decoding and runner timeouts keep memory bounded, and the source behaves the same way and documents these limits. The public port keeps the upstream limits so that it does not silently diverge. Lowering them belongs upstream first.
+
+A full-diff scan found no private repository names, developer paths, private planning documents, private commit references, private roles, filesystem-store settings or private runner file names.
+
+## Not verified
+
+- **GPU.** No GPU was tested. Every Phase 4 backend is CPU-only, JAX refuses CUDA, and the Phase 3 PyTorch CUDA path is still not hardware-verified.
+- **Hosted CI.** The GitHub Actions workflow was not run from here. The workflow was edited, but no hosted pass is claimed.
+- **Model quality.** Real pretrained-model quality was not measured: tests use tiny random offline models.
+
+## Remaining limitations
+
+- **Forecasting** is univariate and recursive.
+- **Transformers** encoders are frozen, and speech recognition is greedy CTC.
+- **Embedding search** is exact over at most 5,000 rows.
+- **Storage.** Every blob is capped at 16 MB.
+- **Inference** is synchronous.
+- **Docker.** The image has no Python.
+
+## Verdict
+
+The Phase 4 (M1–M9) selective port is complete. Every implemented Phase 4 capability works in the public edition through its real framework, on public PostgreSQL storage and with public authorization. Contract v1 and Phase 1–3 behavior are preserved. The fresh and populated-upgrade migration paths pass. The full sequential regression passed with no failures. The work is nine feature and integration commits plus this report, all local; nothing was pushed.
