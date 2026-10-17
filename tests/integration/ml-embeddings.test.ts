@@ -40,8 +40,8 @@ beforeAll(async () => {
 beforeEach(async () => { await pool.query("TRUNCATE ml_blobs,ml_dataset_schemas,ml_datasets,ml_feature_pipelines,ml_experiments,ml_registry_entries,runs,agents CASCADE"); });
 afterAll(async () => { await pool.end(); if (modelRoot) await rm(modelRoot, { recursive: true, force: true }); });
 
-// 300 distinct 0.1 s tones (two build steps of at most 256 rows), each with a payload name.
-const CLIPS = Array.from({ length: 300 }, (_, i) => ({ x: wav(100 + 10 * i, 0.1, 8000), name: `tone-${i}` }));
+// 40 distinct 0.1 s tones, each with a payload name. Audio build steps hold at most 16 rows (one prediction's cap), so three steps.
+const CLIPS = Array.from({ length: 40 }, (_, i) => ({ x: wav(100 + 10 * i, 0.1, 8000), name: `tone-${i}` }));
 
 /** Trains a model through the processor, registers it, marks it READY and opens an endpoint. */
 async function served(backend: MlBackend, columns: { name: string; type: string }[], rows: Record<string, unknown>[], target: string | undefined, algorithm: string, hyperparameters: Record<string, unknown> = {}) {
@@ -70,20 +70,22 @@ describe.runIf(Boolean(audioPython))("embedding indexes over pgvector (Phase 4 M
   it("builds in bounded steps, refuses search and concurrent builds while BUILDING, then finds the identical clip first", async () => {
     const { endpoint, dataset, embeddings } = await audioEmbedder();
     const index = await embeddings.create(manager, { name: "tones", endpointId: endpoint.id, datasetVersionId: dataset.id, metric: "cosine", payloadColumns: ["name"] });
-    expect(index).toMatchObject({ status: "BUILDING", built: 0, row_count: 300, dimension: 26, metric: "cosine" });
+    expect(index).toMatchObject({ status: "BUILDING", built: 0, row_count: 40, dimension: 26, metric: "cosine" });
     const first = await embeddings.build(manager, index.id, signal());
-    expect(first).toMatchObject({ status: "BUILDING", built: 256 });
+    expect(first).toMatchObject({ status: "BUILDING", built: 16 });
     await expect(embeddings.search(manager, index.id, { rows: [{ x: CLIPS[0]!.x, name: "q" }] }, signal())).rejects.toThrow(/Only READY/);
     const racing = await Promise.allSettled([embeddings.build(manager, index.id, signal()), embeddings.build(manager, index.id, signal())]);
     expect(racing.filter(r => r.status === "fulfilled")).toHaveLength(1);
     const lost = racing.find(r => r.status === "rejected") as PromiseRejectedResult;
     expect(lost.reason).toBeInstanceOf(ConflictError); expect(String(lost.reason.message)).toMatch(/being built/);
+    expect(await embeddings.get(manager, index.id)).toMatchObject({ status: "BUILDING", built: 32 });
+    expect(await embeddings.build(manager, index.id, signal())).toMatchObject({ status: "READY", built: 40 });
     const done = await embeddings.get(manager, index.id);
-    expect(done).toMatchObject({ status: "READY", built: 300 }); expect(done.ready_at).not.toBeNull();
+    expect(done).toMatchObject({ status: "READY", built: 40 }); expect(done.ready_at).not.toBeNull();
     await expect(embeddings.build(manager, index.id, signal())).rejects.toThrow(/READY/);
-    const found = await embeddings.search(manager, index.id, { rows: [{ x: CLIPS[123]!.x, name: "q" }], k: 5 }, signal());
+    const found = await embeddings.search(manager, index.id, { rows: [{ x: CLIPS[23]!.x, name: "q" }], k: 5 }, signal());
     const hits = found.results[0]!;
-    expect(hits[0]).toMatchObject({ rowIndex: 123, payload: { name: "tone-123" } }); expect(hits[0]!.score).toBeGreaterThan(0.9999);
+    expect(hits[0]).toMatchObject({ rowIndex: 23, payload: { name: "tone-23" } }); expect(hits[0]!.score).toBeGreaterThan(0.9999);
     expect(hits.every(h => h.score >= -1 && h.score <= 1.0001)).toBe(true);
     expect(hits.map(h => h.score)).toEqual([...hits.map(h => h.score)].sort((a, b) => b - a));
   }, 600_000);
@@ -94,8 +96,8 @@ describe.runIf(Boolean(audioPython))("embedding indexes over pgvector (Phase 4 M
       const index = await embeddings.create(manager, { name: `rank-${metric}`, endpointId: endpoint.id, datasetVersionId: dataset.id, metric });
       await buildAll(embeddings, index.id);
       const vectors = await storedVectors(index.id);
-      const result = await embeddings.search(manager, index.id, { rows: [{ x: CLIPS[57]!.x, name: "q" }], k: 25 }, signal());
-      const expected = rank(metric, vectors[57]!, vectors).slice(0, 25);
+      const result = await embeddings.search(manager, index.id, { rows: [{ x: CLIPS[27]!.x, name: "q" }], k: 25 }, signal());
+      const expected = rank(metric, vectors[27]!, vectors).slice(0, 25);
       expect(result.results[0]!.map(h => h.rowIndex), metric).toEqual(expected.map(e => e.index));
       // pgvector computes in float4; the reference in float64 over the same stored values, so compare relatively.
       result.results[0]!.forEach((h, i) => expect(Math.abs(h.score - expected[i]!.score)).toBeLessThanOrEqual(1e-4 * Math.max(1, Math.abs(expected[i]!.score))));
@@ -115,9 +117,9 @@ describe.runIf(Boolean(audioPython))("embedding indexes over pgvector (Phase 4 M
     await buildAll(embeddings, index.id);
     await expect(embeddings.search(outsider, index.id, { rows: [{ x: CLIPS[0]!.x, name: "q" }] }, signal())).rejects.toBeInstanceOf(NotFoundError);
     expect((await embeddings.search(viewer, index.id, { rows: [{ x: CLIPS[0]!.x, name: "q" }], k: 1 }, signal())).results[0]![0]!.rowIndex).toBe(0);
-    // Bounds: k 1..100, at most 16 query rows, at most 64 rows per side.
+    // Bounds: k 1..100, at most 16 query rows, at most 64 rows per side (the request schema).
     for (const bad of [{ rows: [{ x: CLIPS[0]!.x, name: "q" }], k: 0 }, { rows: [{ x: CLIPS[0]!.x, name: "q" }], k: 101 }, { rows: CLIPS.slice(0, 17) }]) await expect(embeddings.search(manager, index.id, bad, signal())).rejects.toThrow();
-    await expect(embeddings.pairwise(manager, endpoint.id, { left: CLIPS.slice(0, 65), right: CLIPS.slice(0, 1) }, signal())).rejects.toThrow();
+    await expect(embeddings.pairwise(manager, endpoint.id, { left: Array.from({ length: 65 }, () => CLIPS[0]), right: CLIPS.slice(0, 1) }, signal())).rejects.toThrow();
     // Pairwise: identical clips are maximally similar.
     const matrix = (await embeddings.pairwise(manager, endpoint.id, { left: CLIPS.slice(0, 2), right: CLIPS.slice(0, 3) }, signal())).matrix;
     expect(matrix).toHaveLength(2); expect(matrix[0]).toHaveLength(3); expect(matrix[0]![0]).toBeCloseTo(1, 6); expect(matrix[1]![1]).toBeCloseTo(1, 6);
@@ -136,6 +138,25 @@ describe.runIf(Boolean(audioPython))("embedding indexes over pgvector (Phase 4 M
     await expect(pool.query("INSERT INTO ml_embedding_vectors(tenant_id,index_id,dimension,row_index,embedding) VALUES($1,$2,26,0,$3::vector)", [manager.tenantId, building.id, zeros(25)])).rejects.toThrow();
     await expect(pool.query("INSERT INTO ml_embedding_vectors(tenant_id,index_id,dimension,row_index,embedding) VALUES($1,$2,25,0,$3::vector)", [manager.tenantId, building.id, zeros(25)])).rejects.toThrow();
   }, 900_000);
+
+  it("holds every runner call to one prediction's rows and media: build steps are cut, pairwise sides are one request", async () => {
+    const { endpoint, dataset, embeddings } = await audioEmbedder();
+    // Pairwise: both sides share the audio row cap (16), checked before any cell is decoded, and one media budget (120 s).
+    await expect(embeddings.pairwise(manager, endpoint.id, { left: CLIPS.slice(0, 9), right: CLIPS.slice(9, 17) }, signal())).rejects.toThrow(/at most 16 rows/);
+    expect((await embeddings.pairwise(manager, endpoint.id, { left: CLIPS.slice(0, 8), right: CLIPS.slice(8, 16) }, signal())).matrix).toHaveLength(8);
+    const long = Array.from({ length: 16 }, (_, i) => ({ x: wav(200 + 15 * i, 8, 8000), name: `long-${i}` })); // 8 s each
+    // 8 + 8 clips of 8 s are 128 s: refused together, although either side alone (64 s) is within one prediction's budget.
+    await expect(embeddings.pairwise(manager, endpoint.id, { left: long.slice(0, 8), right: long.slice(8) }, signal())).rejects.toThrow(/exceeds 120 seconds/);
+    // Build: 16 stored clips of 8 s fit the row cap but not the media budget, so the first step stops at 15 clips (120 s).
+    const training = new MlTrainingService(pool, store);
+    const longSet = await training.ingest(manager, { name: "long clips", schema: { id: randomUUID(), columns: [{ name: "x", type: "audio" }, { name: "name", type: "string" }] }, rows: long });
+    const index = await embeddings.create(manager, { name: "long", endpointId: endpoint.id, datasetVersionId: longSet.id, payloadColumns: ["name"] });
+    expect(await embeddings.build(manager, index.id, signal())).toMatchObject({ status: "BUILDING", built: 15 });
+    expect(await embeddings.build(manager, index.id, signal())).toMatchObject({ status: "READY", built: 16 });
+    const hits = (await embeddings.search(manager, index.id, { rows: [{ x: long[15]!.x, name: "q" }], k: 1 }, signal())).results[0]!;
+    expect(hits[0]).toMatchObject({ rowIndex: 15, payload: { name: "long-15" } });
+    expect(dataset.rowCount).toBe(40);
+  }, 600_000);
 });
 
 describe.runIf(Boolean(audioPython))("embedding indexes under the API role", () => {
@@ -168,12 +189,17 @@ describe.runIf(Boolean(audioPython))("embedding indexes under the API role", () 
     expect((await call("/ml/embedding-indexes", member, create)).status).toBe(403);
     const created = await call("/ml/embedding-indexes", admin, create); expect(created.status).toBe(201); const index = await created.json();
     expect((await call(`/ml/embedding-indexes/${index.id}/build`, member, {})).status).toBe(403);
-    let state; do state = await (await call(`/ml/embedding-indexes/${index.id}/build`, admin, {})).json(); while (state.status === "BUILDING");
+    // Each HTTP build step embeds at most one prediction's rows: 16 for an audio model.
+    let state = await (await call(`/ml/embedding-indexes/${index.id}/build`, admin, {})).json();
+    expect(state).toMatchObject({ status: "BUILDING", built: 16 });
+    while (state.status === "BUILDING") state = await (await call(`/ml/embedding-indexes/${index.id}/build`, admin, {})).json();
     expect(state.status).toBe("READY");
     const search = await call(`/ml/embedding-indexes/${index.id}/search`, member, { rows: [{ x: CLIPS[9]!.x, name: "q" }], k: 1 });
     expect(search.status).toBe(200); expect((await search.json()).results[0][0]).toMatchObject({ rowIndex: 9, payload: { name: "tone-9" } });
     const pair = await call(`/ml/endpoints/${endpoint.id}/similarity`, member, { left: [{ x: CLIPS[0]!.x, name: "a" }], right: [{ x: CLIPS[0]!.x, name: "a" }] });
     expect(pair.status).toBe(200); expect((await pair.json()).matrix[0][0]).toBeCloseTo(1, 6);
+    // Both sides together are one prediction's rows: 9 + 8 audio clips is a 409 for any member.
+    expect((await call(`/ml/endpoints/${endpoint.id}/similarity`, member, { left: CLIPS.slice(0, 9), right: CLIPS.slice(9, 17) })).status).toBe(409);
     expect((await (await call("/ml/embedding-indexes", member)).json()).map((i: { id: string }) => i.id)).toEqual([index.id]);
     expect(await (await call("/ml/embedding-indexes", other)).json()).toEqual([]);
     expect((await call(`/ml/embedding-indexes/${index.id}`, other)).status).toBe(404);

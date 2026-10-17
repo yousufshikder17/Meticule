@@ -327,7 +327,11 @@ Checked and clean:
 Low findings:
 
 - **Commit messages** named the private source and one private hash. The nine local commits were reworded before they reached `main`. The trees are identical.
-- **Media row caps.** Index builds (256 rows per step) and pairwise similarity (up to 64 x 64) are not held to the per-request media row caps that prediction uses. Batched decoding and runner timeouts keep memory bounded, and the source behaves the same way and documents these limits. The public port keeps the upstream limits so that it does not silently diverge. Lowering them belongs upstream first.
+- **Media row caps (fixed after the port).** Index builds (256 rows per step) and pairwise similarity (64 rows per side, validated per side) were not held to the per-request row caps and media budget that prediction uses. Memory stayed bounded, and the source behaved the same way. The fix was made at the source first (private `745cd55`) and then ported here:
+  - **Build steps** now embed the longest prefix that fits the embedding row cap for the model's feature types and the prediction media budget.
+  - **Pairwise similarity** treats both sides as one request: a combined row cap checked before decoding, one media budget and one runner call.
+
+  The tests cover a build step cut at 15 of 16 eight-second clips and a refused 9 + 8 or 128-second pairwise request. The public HTTP/JWT test also asserts the 16-row step and a member's 409. With the old service the new test fails.
 
 A full-diff scan found no private repository names, developer paths, private planning documents, private commit references, private roles, filesystem-store settings or private runner file names.
 

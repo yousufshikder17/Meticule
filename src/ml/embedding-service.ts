@@ -4,19 +4,22 @@ import type { Principal } from "../db/types.js";
 import { ConflictError, NotFoundError } from "../domain/errors.js";
 import type { ArtifactStore, MlBackend } from "./backend.js";
 import { MlBackendFailure } from "./contract.js";
-import { DatasetVersion, TrainingSnapshot, validateRows, type Row } from "./domain.js";
+import { DatasetVersion, TrainingSnapshot, validateRows, type ColumnType, type Row, type Snapshot } from "./domain.js";
+import { MEDIA_BUDGETS, MediaBudget, decodeBase64, imageHeader, wavLayout } from "./media.js";
 import { getModel } from "./model-catalog.js";
 import { audit, authorizeMl, transaction } from "./persistence.js";
 import { HIGHER_IS_CLOSER, SIMILARITY_METRICS, similarityMatrix, type SimilarityMetric } from "./similarity.js";
-import { embeddingDimension } from "./tasks.js";
+import { embeddingDimension, maxPredictionRows } from "./tasks.js";
 
 /**
  * Embedding indexes and similarity (Phase 4 M6). Generation stays in the backends; this service owns persistence and search.
  * An index holds the vectors of one dataset version embedded by one pinned READY model version, in PostgreSQL with pgvector:
- * built in bounded steps (one runner call of at most BUILD_BATCH rows per request), then READY and append-only, and searched
- * exactly (no approximate index). Every query filters tenant_id; another tenant's index or endpoint is simply not found.
+ * built in bounded steps, then READY and append-only, and searched exactly (no approximate index). Every query filters
+ * tenant_id; another tenant's index or endpoint is simply not found. No runner call here carries more than one prediction
+ * request may (C5): build steps, search queries and pairwise similarity all stay within the embedding task's row cap for the
+ * model's feature types and within the prediction media budget.
  */
-export const MAX_INDEX_ROWS = 5000, BUILD_BATCH = 256, MAX_QUERY_ROWS = 16, MAX_K = 100, MAX_PAIR_ROWS = 64;
+export const MAX_INDEX_ROWS = 5000, MAX_QUERY_ROWS = 16, MAX_K = 100, MAX_PAIR_ROWS = 64;
 // Fixed operator per stored metric (never interpolated from input): cosine distance, negative inner product, euclidean distance.
 const OPERATORS: Record<SimilarityMetric, { operator: string; score: (distance: number) => number }> = {
   cosine: { operator: "<=>", score: d => 1 - d }, dot: { operator: "<#>", score: d => -d }, euclidean: { operator: "<->", score: d => d },
@@ -38,6 +41,35 @@ function checkVector(vector: unknown, dimension: number, metric: SimilarityMetri
   return metric !== "cosine" || vector.some(x => x !== 0);
 }
 const literal = (vector: readonly number[]) => `[${vector.join(",")}]`;
+
+/** The model's feature columns with their types, in pipeline order. */
+function featureColumns(snapshot: Snapshot): { name: string; type: ColumnType }[] {
+  return snapshot.pipeline.definition.features.map(name => ({ name, type: snapshot.dataset.schema.columns.find(col => col.name === name)!.type }));
+}
+
+/**
+ * The longest prefix of `rows` one build step may embed: at most the embedding row cap for these feature types, and no more
+ * media than the prediction budget allows. Stored rows passed the larger ingest budget, so this cuts the batch rather than
+ * refusing it. It always keeps the first row, because a single valid cell is within the prediction budget.
+ */
+function buildBatch(rows: Row[], features: { name: string; type: ColumnType }[]): Row[] {
+  const budget = new MediaBudget(MEDIA_BUDGETS.prediction), batch: Row[] = [];
+  for (const row of rows.slice(0, maxPredictionRows("embedding", features.map(f => f.type)))) {
+    try {
+      for (const { name, type } of features) {
+        const value = row[name];
+        if (typeof value !== "string" || (type !== "image" && type !== "audio")) continue;
+        const bytes = decodeBase64(value);
+        if (type === "image") budget.image(imageHeader(bytes)); else budget.audio(wavLayout(bytes));
+      }
+    } catch (error) {
+      if (batch.length && error instanceof ConflictError) break; // the next step starts with this row
+      throw error;
+    }
+    batch.push(row);
+  }
+  return batch;
+}
 
 export class MlEmbeddingService {
   constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: Map<string, MlBackend>) {}
@@ -81,7 +113,7 @@ export class MlEmbeddingService {
   }
 
   /**
-   * Embeds the next missing batch (at most BUILD_BATCH rows, in dataset row order) in one runner call while holding the index
+   * Embeds the next missing batch (buildBatch, in dataset row order) in one runner call while holding the index
    * row (FOR UPDATE NOWAIT: a concurrent build gets a conflict at once), appends the vectors and marks the index READY when it
    * is complete. A runner that returns an unusable vector marks the index FAILED, and that outcome is committed.
    */
@@ -98,9 +130,9 @@ export class MlEmbeddingService {
       const version = DatasetVersion.parse((await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, index.dataset_version_id])).rows[0].document);
       const rows = JSON.parse((await this.artifacts.get(principal.tenantId, version.content)).toString("utf8")) as Row[];
       if (rows.length !== index.row_count) throw new MlBackendFailure("invalid_response", "Dataset row count differs from the index");
-      const batch = rows.slice(built, built + BUILD_BATCH);
-      const snapshot = TrainingSnapshot.parse(model.snapshot), features = snapshot.pipeline.definition.features;
-      const vectors = await this.embed(principal.tenantId, model, batch.map(row => Object.fromEntries(features.map(f => [f, row[f] ?? null]))), signal);
+      const snapshot = TrainingSnapshot.parse(model.snapshot), features = featureColumns(snapshot);
+      const batch = buildBatch(rows.slice(built), features);
+      const vectors = await this.embed(principal.tenantId, model, batch.map(row => Object.fromEntries(features.map(f => [f.name, row[f.name] ?? null]))), signal);
       if (vectors.length !== batch.length || !vectors.every(v => checkVector(v, index.dimension, index.metric))) {
         await c.query("UPDATE ml_embedding_indexes SET status='FAILED' WHERE tenant_id=$1 AND id=$2", [principal.tenantId, indexId]);
         await audit(c, principal.tenantId, principal.userId, "ml.embedding_index_failed", { indexId, reason: "invalid_response" });
@@ -141,15 +173,20 @@ export class MlEmbeddingService {
     return { metric, closer: HIGHER_IS_CLOSER[metric] ? "higher" : "lower", results };
   }
 
-  /** left x right similarity of rows embedded through an ACTIVE endpoint whose READY model produces embeddings. */
+  /**
+   * left x right similarity of rows embedded through an ACTIVE endpoint whose READY model produces embeddings. Both sides are
+   * one request: they share the embedding row cap and the prediction media budget, and are embedded in one runner call.
+   */
   async pairwise(principal: Principal, endpointId: string, raw: unknown, signal: AbortSignal) {
     authorizeMl(principal); const input = PairwiseSimilarity.parse(raw);
     const endpoint = (await this.pool.query("SELECT model_version_id FROM ml_endpoints WHERE tenant_id=$1 AND id=$2 AND status='ACTIVE'", [principal.tenantId, endpointId])).rows[0];
     if (!endpoint) throw new NotFoundError("Active endpoint not found");
     const model = await this.pinned(this.pool, principal.tenantId, endpoint.model_version_id);
     const snapshot = TrainingSnapshot.parse(model.snapshot);
-    const left = await this.embed(principal.tenantId, model, validateRows(snapshot.dataset.schema, input.left, true), signal);
-    const right = await this.embed(principal.tenantId, model, validateRows(snapshot.dataset.schema, input.right, true), signal);
+    const limit = maxPredictionRows("embedding", featureColumns(snapshot).map(f => f.type)), count = input.left.length + input.right.length;
+    if (count > limit) throw new ConflictError(`Pairwise similarity embeds at most ${limit} rows per request for this model`);
+    const vectors = await this.embed(principal.tenantId, model, validateRows(snapshot.dataset.schema, [...input.left, ...input.right], true), signal);
+    const left = vectors.slice(0, input.left.length), right = vectors.slice(input.left.length);
     const matrix = similarityMatrix(input.metric, left, right);
     await transaction(this.pool, c => audit(c, principal.tenantId, principal.userId, "ml.embedding_similarity", { endpointId, left: left.length, right: right.length, metric: input.metric }));
     return { metric: input.metric, closer: HIGHER_IS_CLOSER[input.metric] ? "higher" : "lower", matrix };

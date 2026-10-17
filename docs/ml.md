@@ -336,10 +336,10 @@ A Transformers artifact records the model's name and verified digest, plus any t
 An embedding prediction returns its vectors once and stores only `{digest, shape}`. Persistent search is a separate, explicit step:
 
 1. **Create** an index (`tenant_admin`). It needs an active endpoint whose READY model performs `embedding`, and a dataset version of at most 5,000 rows with that model's feature columns.
-2. **Build** it (`tenant_admin`) in steps of at most 256 rows. A concurrent build gets 409. The index becomes READY when every row has a vector, or FAILED on a wrong-dimension, non-finite or (under cosine) zero vector.
+2. **Build** it (`tenant_admin`) in steps. A step never embeds more than one prediction request may: at most the embedding row cap for the model's feature types (256 tabular, 64 text, 32 image, 16 audio) and within the prediction media budget. Stored rows passed the larger ingest budget, so a step is cut short rather than refused; a 5,000-row audio index takes about 313 steps. A concurrent build gets 409. The index becomes READY when every row has a vector, or FAILED on a wrong-dimension, non-finite or (under cosine) zero vector.
 3. **Search** it (any authenticated tenant member): at most 16 query rows, `k` up to 100. Search is exact (no approximate index), with `cosine`, `dot` or `euclidean`. Results are `{rowIndex, score, payload}` with up to 16 payload columns.
 
-Pairwise similarity (any tenant member) embeds at most 64 x 64 rows through an endpoint and scores them without storing anything.
+Pairwise similarity (any tenant member) takes at most 64 rows per side. Both sides count as one request, so together they must fit one prediction's row cap and media budget (409 otherwise). They are embedded in one runner call and scored without storing anything.
 
 Vectors live in PostgreSQL with pgvector, under the same tenant RLS as the other ML tables; there is no separate vector database. Database triggers keep vectors append-only and allow only the BUILDING → READY | FAILED transition.
 
@@ -413,9 +413,9 @@ All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are
 | POST | `/ml/experiments/:id/cancel` | Cancel unfinished candidates (`tenant_admin`) |
 | GET/POST | `/ml/embedding-indexes` | List / create an index `{name,endpointId,datasetVersionId,metric?,payloadColumns?}` (`tenant_admin`) |
 | GET | `/ml/embedding-indexes/:id` | Index status and vectors built |
-| POST | `/ml/embedding-indexes/:id/build` | Embed the next at most 256 rows (`tenant_admin`); 409 while another build runs, 422 when it fails |
+| POST | `/ml/embedding-indexes/:id/build` | Embed the next step, at most one prediction's rows and media (`tenant_admin`); 409 while another build runs, 422 when it fails |
 | POST | `/ml/embedding-indexes/:id/search` | `{rows,k?}`: exact nearest rows for at most 16 queries |
-| POST | `/ml/endpoints/:id/similarity` | `{left,right,metric?}`: at most 64 x 64 pairwise scores through an embedding endpoint |
+| POST | `/ml/endpoints/:id/similarity` | `{left,right,metric?}`: pairwise scores through an embedding endpoint; at most 64 rows per side, both sides within one prediction's row cap and media budget |
 
 Prediction batches must follow the original dataset schema with its target omitted (forecasting history rows include it). The row cap depends on the task: 1,000 for classification, regression and anomaly detection, 5,000 history rows for forecasting, 256 for embeddings, 8 for transcription, and lower with media: 32 rows with an image column, 16 with audio, 64 for text embeddings. It is checked before any cell is decoded. Malformed schema definitions return 400, incompatible data/inference rows 409, backend inference failures 422 with a durable FAILED record, and management-role failures 403. Retiring a version disables its endpoints atomically.
 
