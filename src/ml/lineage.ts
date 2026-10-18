@@ -45,6 +45,20 @@ export class MlLineageService {
     return { upstream, downstream: await this.downstream(this.pool, principal.tenantId, models), issues, verified: verify };
   }
 
+  /** A deployment traced through its serving (or newest READY) revision to the model version, experiment and dataset. */
+  async deployment(principal: Principal, id: string, verify = false) {
+    authorizeMl(principal);
+    const d = (await this.pool.query("SELECT * FROM ml_deployments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, id])).rows[0];
+    if (!d) throw new NotFoundError("Deployment not found");
+    const revisions = (await this.pool.query("SELECT revision,model_version_id,runtime,onnx_export_id,status,created_at,validated_at FROM ml_deployment_revisions WHERE tenant_id=$1 AND deployment_id=$2 ORDER BY revision", [principal.tenantId, id])).rows;
+    const current = revisions.find(r => r.revision === d.active_revision) ?? revisions.filter(r => r.status === "READY").at(-1) ?? null;
+    return {
+      deployment: { id: d.id, name: d.name, status: d.status, activeRevision: d.active_revision, activeEndpointId: d.active_endpoint_id },
+      revisions, traced: current ? { revision: current.revision, runtime: current.runtime, onnxExportId: current.onnx_export_id, serving: current.revision === d.active_revision } : null,
+      model: current ? await this.modelVersion(principal, current.model_version_id, verify) : null,
+    };
+  }
+
   /** Everything built from one dataset version: jobs, their attempts, registered versions and what serves them. */
   async datasetVersion(principal: Principal, id: string) {
     authorizeMl(principal);
@@ -94,13 +108,14 @@ export class MlLineageService {
 
   /** What serves the given model versions. Later Phase 5 milestones add deployments, exports and reports here. */
   async downstream(db: Db, tenantId: string, modelVersionIds: string[]) {
-    if (!modelVersionIds.length) return { modelVersions: [], endpoints: [], onnxExports: [] };
-    const [models, endpoints, onnxExports] = await sequence([
+    if (!modelVersionIds.length) return { modelVersions: [], endpoints: [], onnxExports: [], deployments: [] };
+    const [models, endpoints, onnxExports, deployments] = await sequence([
       () => db.query("SELECT id,registry_entry_id,version,status,training_run_id,created_at FROM ml_model_versions WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
       () => db.query("SELECT id,name,model_version_id,status,created_at FROM ml_endpoints WHERE tenant_id=$1 AND model_version_id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
       () => db.query("SELECT id,model_version_id,status,content->>'sha256' AS sha256,opsets,producer,created_at FROM ml_onnx_exports WHERE tenant_id=$1 AND model_version_id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
+      () => db.query("SELECT r.deployment_id,d.name,d.status AS deployment_status,r.revision,r.model_version_id,r.runtime,r.status,d.active_revision=r.revision AS serving FROM ml_deployment_revisions r JOIN ml_deployments d ON d.tenant_id=r.tenant_id AND d.id=r.deployment_id WHERE r.tenant_id=$1 AND r.model_version_id=ANY($2::uuid[]) ORDER BY r.created_at", [tenantId, modelVersionIds]),
     ]);
-    return { modelVersions: models.rows, endpoints: endpoints.rows, onnxExports: onnxExports.rows };
+    return { modelVersions: models.rows, endpoints: endpoints.rows, onnxExports: onnxExports.rows, deployments: deployments.rows };
   }
 
   /** Re-reads the bytes behind each reference through the store's checksum check. Reports which reference failed, never why. */

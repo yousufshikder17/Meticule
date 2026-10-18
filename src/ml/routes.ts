@@ -17,6 +17,7 @@ import { MlLineageService } from "./lineage.js";
 import { MlMlflowService } from "./mlflow.js";
 import { GovernanceRefusal, MlGovernanceService } from "./governance.js";
 import { MlOnnxService } from "./onnx.js";
+import { MlDeploymentService } from "./deployments.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export { FeatureDisabled } from "./persistence.js";
@@ -72,9 +73,9 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
     const { job } = await new MlTrainingService(database, new PostgresArtifactStore(c.get("database"))).getJob(p, id(c.req.param("id")));
     return c.json(await new RunRepository(database).requestCancellation(p, job.run_id));
   });
-  app.get("/ml/training-runs/:id/compare/:candidate", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).compare(c.get("principal"), id(c.req.param("id")), id(c.req.param("candidate")))));
-  app.post("/ml/registry", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).registry(c.get("principal"), await c.req.json()), 201));
-  app.post("/ml/registry/:id/versions", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).register(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
+  app.get("/ml/training-runs/:id/compare/:candidate", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).compare(c.get("principal"), id(c.req.param("id")), id(c.req.param("candidate")))));
+  app.post("/ml/registry", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).registry(c.get("principal"), await c.req.json()), 201));
+  app.post("/ml/registry/:id/versions", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).register(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
   app.get("/ml/registry/:id/versions", async c => {
     const p = c.get("principal"); authorizeMl(p);
     return c.json((await c.get("database").query("SELECT * FROM ml_model_versions WHERE tenant_id=$1 AND registry_entry_id=$2 ORDER BY version DESC LIMIT 100", [p.tenantId, id(c.req.param("id"))])).rows);
@@ -87,7 +88,7 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
   app.post("/ml/model-versions/:id/transition", async c => {
     const input = ModelTransitionInput.parse(await c.req.json());
     // A refusal is returned, not rethrown, so the recorded refusal event commits with the request.
-    try { return c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).transition(c.get("principal"), id(c.req.param("id")), input.status, input.reason)); }
+    try { return c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).transition(c.get("principal"), id(c.req.param("id")), input.status, input.reason)); }
     catch (error) { if (error instanceof GovernanceRefusal) return c.json({ error: "transition_refused", message: error.message, reasons: error.reasons }, 409); throw error; }
   });
   const governance = (database: pg.Pool) => new MlGovernanceService(database, new PostgresArtifactStore(database));
@@ -95,17 +96,36 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
   // An unsupported or out-of-tolerance export is a recorded outcome (422), returned so the record commits with the request.
   app.post("/ml/model-versions/:id/onnx-exports", async c => { const r = await onnx(c.get("database")).export(c.get("principal"), id(c.req.param("id")), c.req.raw.signal); return c.json(r, r.status === "VERIFIED" ? 201 : 422); });
   app.get("/ml/model-versions/:id/onnx-exports", async c => c.json(await onnx(c.get("database")).list(c.get("principal"), id(c.req.param("id")))));
+  const deployments = (database: pg.Pool) => new MlDeploymentService(database, new PostgresArtifactStore(database), ml.backends, { onnx: ml.onnx });
+  // Refusals are answered here (not rethrown) so their recorded events commit with the request.
+  const governed = async (c: { json: (body: unknown, status: 201 | 200 | 409) => Response }, work: () => Promise<unknown>, status: 200 | 201 = 200) => {
+    try { return c.json(await work(), status); }
+    catch (error) { if (error instanceof GovernanceRefusal) return c.json({ error: "refused", message: error.message, reasons: error.reasons }, 409); throw error; }
+  };
+  app.get("/ml/deployments", async c => c.json(await deployments(c.get("database")).list(c.get("principal"))));
+  app.post("/ml/deployments", async c => c.json(await deployments(c.get("database")).create(c.get("principal"), await c.req.json()), 201));
+  app.get("/ml/deployments/:id", async c => c.json(await deployments(c.get("database")).get(c.get("principal"), id(c.req.param("id")))));
+  app.post("/ml/deployments/:id/revisions", async c => { const body = await c.req.json(); return governed(c, () => deployments(c.get("database")).addRevision(c.get("principal"), id(c.req.param("id")), body, c.req.raw.signal), 201); });
+  for (const action of ["activate", "rollback", "deactivate"] as const) app.post(`/ml/deployments/:id/${action}`, async c => {
+    const body = await c.req.json().catch(() => ({})), service = deployments(c.get("database")), p = c.get("principal"), target = id(c.req.param("id"));
+    return governed(c, () => action === "activate" ? service.activate(p, target, body) : action === "rollback" ? service.rollback(p, target, body) : service.deactivate(p, target, body));
+  });
+  app.post("/ml/deployments/:id/predict", async c => {
+    const record = await deployments(c.get("database")).predict(c.get("principal"), id(c.req.param("id")), z.object({ rows: z.unknown() }).parse(await c.req.json()).rows, c.req.raw.signal);
+    return c.json(record, record.status === "FAILED" ? 422 : 200);
+  });
+  app.get("/ml/lineage/deployments/:id", async c => c.json(await lineage(c.get("database")).deployment(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
   app.get("/ml/onnx-exports/:id/content", async c => c.body(new Uint8Array(await onnx(c.get("database")).content(c.get("principal"), id(c.req.param("id")))), 200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=model.onnx" }));
   app.put("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).setPolicy(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
   app.get("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).policies(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/model-versions/:id/approvals", async c => c.json(await governance(c.get("database")).approve(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
   app.get("/ml/model-versions/:id/readiness", async c => c.json(await governance(c.get("database")).readiness(c.get("principal"), id(c.req.param("id")))));
   app.get("/ml/model-versions/:id/events", async c => c.json(await governance(c.get("database")).events(c.get("principal"), id(c.req.param("id")))));
-  app.post("/ml/endpoints", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).endpoint(c.get("principal"), await c.req.json()), 201));
-  app.post("/ml/endpoints/:id/disable", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).disableEndpoint(c.get("principal"), id(c.req.param("id")))));
-  app.get("/ml/endpoints/:id/monitoring", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).monitoring(c.get("principal"), id(c.req.param("id")))));
+  app.post("/ml/endpoints", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).endpoint(c.get("principal"), await c.req.json()), 201));
+  app.post("/ml/endpoints/:id/disable", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).disableEndpoint(c.get("principal"), id(c.req.param("id")))));
+  app.get("/ml/endpoints/:id/monitoring", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).monitoring(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/endpoints/:id/predict", async c => {
-    const record = await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).predict(c.get("principal"), id(c.req.param("id")), z.object({ rows: z.unknown() }).parse(await c.req.json()).rows, c.req.raw.signal);
+    const record = await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).predict(c.get("principal"), id(c.req.param("id")), z.object({ rows: z.unknown() }).parse(await c.req.json()).rows, c.req.raw.signal);
     return c.json(record, record.status === "FAILED" ? 422 : 200);
   });
   registerExperimentRoutes(app, ml);

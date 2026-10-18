@@ -46,13 +46,13 @@ export async function dropBlob(tenantId: string, sha256: string): Promise<void> 
 }
 export const truncate = () => pool.query("TRUNCATE ml_dataset_schemas,ml_datasets,ml_feature_pipelines,ml_experiments,ml_registry_entries,runs,agents CASCADE");
 
-export async function trainedModel(store: PostgresArtifactStore, backend: MlBackend = new LinearTestBackend(), options: { alpha?: number; rows?: number } = {}) {
+export async function trainedModel(store: PostgresArtifactStore, backend: MlBackend = new LinearTestBackend(), options: { alpha?: number; rows?: number; algorithm?: string } = {}) {
   const backends = new Map([[backend.id, backend]]);
   const training = new MlTrainingService(pool, store), models = new MlModelService(pool, store, backends);
   const dataset = await training.ingest(manager, { name: "linear", schema: { id: randomUUID(), columns: [{ name: "x", type: "number" }, { name: "y", type: "number" }], target: "y" }, rows: Array.from({ length: options.rows ?? 60 }, (_, i) => ({ x: i, y: 2 * i + 1 })) });
   const pipeline = await training.pipeline(manager, { name: "numeric", definition: { features: ["x"], steps: [] } });
   const experiment = await training.experiment(manager, { name: "phase5", project: "mlops", tags: { team: "core" } });
-  const spec = { datasetVersionId: dataset.id, featurePipelineId: pipeline.id, backend: backend.id, algorithm: "linear", hyperparameters: { alpha: options.alpha ?? 3 }, seed: 7, split: { id: randomUUID(), strategy: "random", train: .6, validation: .2, test: .2 } };
+  const spec = { datasetVersionId: dataset.id, featurePipelineId: pipeline.id, backend: backend.id, algorithm: options.algorithm ?? "linear", hyperparameters: { alpha: options.alpha ?? 3 }, seed: 7, split: { id: randomUUID(), strategy: "random", train: .6, validation: .2, test: .2 } };
   const job = await training.queue(manager, { experimentId: experiment.id, spec });
   const worker = new LifecycleWorker(pool, { workerId: "mlops-test", leaseSeconds: 30, kind: "ml" }, new TrainingProcessor(pool, store, backends));
   await worker.tick();

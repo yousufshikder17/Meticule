@@ -8,6 +8,7 @@ import { failureCategory, MlBackendFailure } from "./contract.js";
 import { TrainingSnapshot, assertModelTransition, cohortKey, compareMetrics, validateRows, type ModelState, type MetricValue } from "./domain.js";
 import { audit, authorizeMl, transaction } from "./persistence.js";
 import { GovernanceRefusal, lifecycleContext, MlGovernanceService, type Reason } from "./governance.js";
+import { MlOnnxService, type OnnxConfig } from "./onnx.js";
 import { getModel } from "./model-catalog.js";
 import { TASKS, embeddingDimension, maxPredictionRows, predictionCount, validatePredictions } from "./tasks.js";
 
@@ -18,7 +19,7 @@ export const EndpointInput = z.object({ name: Name, modelVersionId: z.uuid() });
 export const ModelTransitionInput = z.object({ status: z.enum(["READY", "RETIRED", "REJECTED"]), reason: z.string().trim().min(1).max(1000).optional() });
 
 export class MlModelService {
-  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>) {}
+  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>, private readonly options: { onnx?: OnnxConfig | null | undefined } = {}) {}
   async registry(principal: Principal, raw: unknown) {
     authorizeMl(principal, true); const input = RegistryInput.parse(raw);
     return transaction(this.pool, async c => {
@@ -105,8 +106,9 @@ export class MlModelService {
   async predict(principal: Principal, endpointId: string, raw: unknown, signal: AbortSignal) {
     authorizeMl(principal);
     const pending = await transaction(this.pool, async c => {
-      const selected = await c.query(`SELECT e.id,m.id AS model_version_id,t.snapshot,t.environment,a.content,a.format FROM ml_endpoints e
+      const selected = await c.query(`SELECT e.id,e.runtime,x.content AS onnx_content,m.id AS model_version_id,t.snapshot,t.environment,a.content,a.format FROM ml_endpoints e
         JOIN ml_model_versions m ON m.tenant_id=e.tenant_id AND m.id=e.model_version_id
+        LEFT JOIN ml_onnx_exports x ON x.tenant_id=e.tenant_id AND x.id=e.onnx_export_id
         JOIN ml_training_runs t ON t.tenant_id=m.tenant_id AND t.id=m.training_run_id
         JOIN ml_artifacts a ON a.tenant_id=m.tenant_id AND a.id=m.artifact_id
         WHERE e.tenant_id=$1 AND e.id=$2 AND e.status='ACTIVE' AND m.status='READY' FOR SHARE OF e,m`, [principal.tenantId, endpointId]);
@@ -118,15 +120,20 @@ export class MlModelService {
       const limit = maxPredictionRows(definition.taskType, columns.map(c => c.type));
       if (Array.isArray(raw) && raw.length > limit) throw new ConflictError(`Prediction batch exceeds ${limit} rows`);
       const rows = validateRows(snapshot.dataset.schema, raw, true, task.predictionIncludesTarget);
-      const backend = this.backends.get(snapshot.backend); if (!backend) throw new ConflictError("Inference backend is not configured");
+      // An ONNX endpoint needs the ONNX runtime, not the training backend; a native endpoint needs its backend.
+      const backend = this.backends.get(snapshot.backend);
+      if (model.runtime === "onnx" ? !this.options.onnx : !backend) throw new ConflictError("Inference backend is not configured");
       const p = await c.query("INSERT INTO ml_predictions(tenant_id,endpoint_id,model_version_id,input_hash,count) VALUES($1,$2,$3,$4,$5) RETURNING *", [principal.tenantId, endpointId, model.model_version_id, canonicalJsonHash(rows), rows.length]);
       return { record: p.rows[0], model, snapshot, rows, backend, definition };
     });
     const started = Date.now(); let output: unknown[] | null = null; let failure: { code: string; category: string; message: string } | null = null;
     try {
-      if (!pending.backend.capabilities.artifactFormats.includes(pending.model.format)) throw new MlBackendFailure("incompatible_artifact", "Unsupported artifact format");
-      const bytes = await this.artifacts.get(principal.tenantId, pending.model.content);
-      output = await pending.backend.predict(pending.snapshot, bytes, pending.rows, pending.model.environment, signal);
+      if (pending.model.runtime === "onnx") output = await new MlOnnxService(this.pool, this.artifacts, this.options.onnx!).predict(principal.tenantId, pending.model.onnx_content, pending.snapshot, pending.rows, signal);
+      else {
+        if (!pending.backend!.capabilities.artifactFormats.includes(pending.model.format)) throw new MlBackendFailure("incompatible_artifact", "Unsupported artifact format");
+        const bytes = await this.artifacts.get(principal.tenantId, pending.model.content);
+        output = await pending.backend!.predict(pending.snapshot, bytes, pending.rows, pending.model.environment, signal);
+      }
       output = validatePredictions(pending.definition.taskType, output, predictionCount(pending.definition, pending.snapshot, pending.rows.length), pending.model.environment);
     } catch (error) { output = null; failure = { code: "ml_prediction_failed", category: error instanceof z.ZodError ? "invalid_response" : failureCategory(error, "prediction_failed"), message: "Inference failed; inspect worker environment and artifact integrity" }; }
     return transaction(this.pool, async c => {
