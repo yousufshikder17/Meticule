@@ -21,7 +21,7 @@ const runsTagged = async (experimentId: string, trainingRunId: string) => ((awai
 beforeAll(async () => {
   if (!python) return;
   directory = await mkdtemp(join(tmpdir(), "meticule-mlflow-")); const port = await freePort(); uri = `http://127.0.0.1:${port}`;
-  server = spawn(python, ["-m", "mlflow", "server", "--host", "127.0.0.1", "--port", String(port), "--backend-store-uri", `sqlite:///${join(directory, "mlflow.db").replaceAll("\\", "/")}`, "--artifacts-destination", join(directory, "artifacts")], { stdio: "ignore", windowsHide: true, env: { ...process.env, MLFLOW_DISABLE_TELEMETRY: "true", DO_NOT_TRACK: "true" } });
+  server = spawn(python, ["-m", "mlflow", "server", "--workers", "1", "--host", "127.0.0.1", "--port", String(port), "--backend-store-uri", `sqlite:///${join(directory, "mlflow.db").replaceAll("\\", "/")}`, "--artifacts-destination", join(directory, "artifacts")], { stdio: "ignore", windowsHide: true, env: { ...process.env, MLFLOW_DISABLE_TELEMETRY: "true", DO_NOT_TRACK: "true" } });
   for (let i = 0; i < 240; i++) { try { if ((await fetch(`${uri}/health`)).ok) return; } catch { /* starting */ } await new Promise(r => setTimeout(r, 500)); }
   throw new Error("MLflow server did not start");
 }, 150_000);

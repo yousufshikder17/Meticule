@@ -19,6 +19,7 @@ import { GovernanceRefusal, MlGovernanceService } from "./governance.js";
 import { MlOnnxService } from "./onnx.js";
 import { MlDeploymentService } from "./deployments.js";
 import { MlMonitoringService } from "./monitoring.js";
+import { MlReportService } from "./reports.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export { FeatureDisabled } from "./persistence.js";
@@ -120,6 +121,13 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
   app.post("/ml/deployments/:id/drift-evaluations", async c => c.json(await monitoring(c.get("database")).evaluateDrift(c.get("principal"), id(c.req.param("id")), await c.req.json().catch(() => ({}))), 201));
   app.get("/ml/deployments/:id/drift-evaluations", async c => c.json(await monitoring(c.get("database")).evaluations(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/predictions/:id/feedback", async c => c.json(await monitoring(c.get("database")).feedback(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
+  const reports = (database: pg.Pool) => { if (!ml.reports) throw new FeatureDisabled("reports"); return new MlReportService(database, new PostgresArtifactStore(database), ml.backends, ml.reports); };
+  app.post("/ml/reports", async c => c.json(await reports(c.get("database")).create(c.get("principal"), await c.req.json(), c.req.raw.signal), 201));
+  app.get("/ml/reports", async c => c.json(await reports(c.get("database")).list(c.get("principal"), c.req.query("kind"))));
+  app.get("/ml/reports/:id", async c => c.json(await reports(c.get("database")).get(c.get("principal"), id(c.req.param("id")))));
+  // SVG is served inert: no scripts, no external loads, no MIME sniffing.
+  app.get("/ml/reports/:id/content", async c => { const r = await reports(c.get("database")).content(c.get("principal"), id(c.req.param("id")));
+    return c.body(new Uint8Array(r.bytes), 200, { "content-type": r.mediaType, "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox", "cache-control": "private, no-store" }); });
   app.get("/ml/lineage/deployments/:id", async c => c.json(await lineage(c.get("database")).deployment(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
   app.get("/ml/onnx-exports/:id/content", async c => c.body(new Uint8Array(await onnx(c.get("database")).content(c.get("principal"), id(c.req.param("id")))), 200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=model.onnx" }));
   app.put("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).setPolicy(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));

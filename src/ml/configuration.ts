@@ -40,6 +40,7 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_MLOPS_PYTHON: z.string().min(1).default(python),
     ML_OPTUNA_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_ONNX_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_REPORTS_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_MLFLOW_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_MLFLOW_TRACKING_URI: z.string().default(""),
     ML_MLFLOW_TRACKING_TOKEN: z.string().default(""),
@@ -68,6 +69,7 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
   return { enabled: config.ML_ENABLED === "true", backends,
     optuna: on(config.ML_OPTUNA_ENABLED) ? runner : null,
     onnx: on(config.ML_ONNX_ENABLED) ? runner : null,
+    reports: on(config.ML_REPORTS_ENABLED) ? runner : null,
     mlflow: on(config.ML_MLFLOW_ENABLED) ? { ...runner, trackingUri: config.ML_MLFLOW_TRACKING_URI, token: config.ML_MLFLOW_TRACKING_TOKEN, prefix: config.ML_MLFLOW_EXPERIMENT_PREFIX } : null };
 }
 

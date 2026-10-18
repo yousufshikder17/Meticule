@@ -75,6 +75,7 @@ const RUNNER_CODES: Record<string, MlFailureCategory> = {
   invalid_search_space: "invalid_request",
   unsupported_conversion: "unsupported_capability",
   onnx_model_refused: "incompatible_artifact",
+  invalid_report_data: "invalid_request",
 };
 
 /** Every refusal code a runner may print. The Python runners must emit exactly this set (see the contract unit test). */
