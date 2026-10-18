@@ -32,6 +32,7 @@ export class MlLineageService {
     return {
       modelVersion: { id: m.id, registryEntryId: m.registry_entry_id, registryName: m.registry_name, version: m.version, status: m.status, createdAt: m.created_at, artifact: { id: m.artifact_id, format: m.format, sha256: m.content.sha256, size: m.content.size } },
       upstream, downstream: await this.downstream(this.pool, principal.tenantId, [m.id]), issues, verified: verify,
+      lifecycle: (await this.pool.query("SELECT event,from_status,to_status,actor,reason,details,created_at FROM ml_model_events WHERE tenant_id=$1 AND model_version_id=$2 ORDER BY created_at,id LIMIT 500", [principal.tenantId, m.id])).rows,
     };
   }
 

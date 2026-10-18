@@ -8,6 +8,7 @@ import { CreateAgentSchema, CreateRunSchema, PatchAgentSchema, ResumeRunSchema, 
 import { ConflictError, NotFoundError } from "../domain/errors.js";
 import { InvalidTransitionError } from "../domain/run-state.js";
 import { FeatureDisabled, type MlRouteConfiguration } from "../ml/routes.js";
+import { GovernanceRefusal } from "../ml/governance.js";
 import { createToolRegistry } from "../tools/registry.js";
 import { ApprovalService } from "../approvals/approval-service.js";
 import { ApprovalDecisionSchema } from "../domain/schemas.js";
@@ -73,6 +74,7 @@ export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval
     if (error instanceof ConnectorCallError) return c.json({ error: error.code, message: error.message }, error.code === "rate_limited" ? 429 : 400);
     if (error instanceof McpTransportError) return c.json({ error: "mcp_transport_error", code: error.code, message: error.message }, 502);
     if (error instanceof FeatureDisabled) return c.json({ error: "ml_feature_not_configured", message: error.message }, 503);
+    if (error instanceof GovernanceRefusal) return c.json({ error: "conflict", message: error.message, reasons: error.reasons }, 409);
     if (error instanceof ConflictError || error instanceof InvalidTransitionError) return c.json({ error: "conflict", message: error.message }, 409);
     structuredLogger.log("error", "http.request_failed", { correlationId: c.get("correlationId"), method: c.req.method, path: c.req.path, error });
     return c.json({ error: "internal_error" }, 500);

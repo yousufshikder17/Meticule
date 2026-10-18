@@ -15,6 +15,7 @@ import { registerExperimentRoutes } from "./experiment-routes.js";
 import { MlTrackingService } from "./tracking.js";
 import { MlLineageService } from "./lineage.js";
 import { MlMlflowService } from "./mlflow.js";
+import { GovernanceRefusal, MlGovernanceService } from "./governance.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export { FeatureDisabled } from "./persistence.js";
@@ -82,7 +83,18 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
     const result = await c.get("database").query("SELECT m.*,t.snapshot,t.environment,t.resolved_hyperparameters,a.content,a.format FROM ml_model_versions m JOIN ml_training_runs t ON t.tenant_id=m.tenant_id AND t.id=m.training_run_id JOIN ml_artifacts a ON a.tenant_id=m.tenant_id AND a.id=m.artifact_id WHERE m.tenant_id=$1 AND m.id=$2", [p.tenantId, id(c.req.param("id"))]);
     if (!result.rowCount) throw new NotFoundError("Model version not found"); return c.json(result.rows[0]);
   });
-  app.post("/ml/model-versions/:id/transition", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).transition(c.get("principal"), id(c.req.param("id")), ModelTransitionInput.parse(await c.req.json()).status)));
+  app.post("/ml/model-versions/:id/transition", async c => {
+    const input = ModelTransitionInput.parse(await c.req.json());
+    // A refusal is returned, not rethrown, so the recorded refusal event commits with the request.
+    try { return c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).transition(c.get("principal"), id(c.req.param("id")), input.status, input.reason)); }
+    catch (error) { if (error instanceof GovernanceRefusal) return c.json({ error: "transition_refused", message: error.message, reasons: error.reasons }, 409); throw error; }
+  });
+  const governance = (database: pg.Pool) => new MlGovernanceService(database, new PostgresArtifactStore(database));
+  app.put("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).setPolicy(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
+  app.get("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).policies(c.get("principal"), id(c.req.param("id")))));
+  app.post("/ml/model-versions/:id/approvals", async c => c.json(await governance(c.get("database")).approve(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
+  app.get("/ml/model-versions/:id/readiness", async c => c.json(await governance(c.get("database")).readiness(c.get("principal"), id(c.req.param("id")))));
+  app.get("/ml/model-versions/:id/events", async c => c.json(await governance(c.get("database")).events(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/endpoints", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).endpoint(c.get("principal"), await c.req.json()), 201));
   app.post("/ml/endpoints/:id/disable", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).disableEndpoint(c.get("principal"), id(c.req.param("id")))));
   app.get("/ml/endpoints/:id/monitoring", async c => c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends).monitoring(c.get("principal"), id(c.req.param("id")))));

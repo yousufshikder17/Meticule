@@ -7,6 +7,7 @@ import type { ArtifactStore, MlBackend } from "./backend.js";
 import { failureCategory, MlBackendFailure } from "./contract.js";
 import { TrainingSnapshot, assertModelTransition, cohortKey, compareMetrics, validateRows, type ModelState, type MetricValue } from "./domain.js";
 import { audit, authorizeMl, transaction } from "./persistence.js";
+import { GovernanceRefusal, lifecycleContext, MlGovernanceService, type Reason } from "./governance.js";
 import { getModel } from "./model-catalog.js";
 import { TASKS, embeddingDimension, maxPredictionRows, predictionCount, validatePredictions } from "./tasks.js";
 
@@ -14,7 +15,7 @@ const Name = z.string().trim().min(1).max(120);
 export const RegistryInput = z.object({ name: Name });
 export const ModelVersionInput = z.object({ trainingRunId: z.uuid() });
 export const EndpointInput = z.object({ name: Name, modelVersionId: z.uuid() });
-export const ModelTransitionInput = z.object({ status: z.enum(["READY", "RETIRED", "REJECTED"]) });
+export const ModelTransitionInput = z.object({ status: z.enum(["READY", "RETIRED", "REJECTED"]), reason: z.string().trim().min(1).max(1000).optional() });
 
 export class MlModelService {
   constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>) {}
@@ -34,20 +35,36 @@ export class MlModelService {
       const existing = await c.query("SELECT * FROM ml_model_versions WHERE tenant_id=$1 AND registry_entry_id=$2 AND training_run_id=$3", [principal.tenantId, registryId, input.trainingRunId]);
       if (existing.rowCount) return existing.rows[0];
       const version = (await c.query("SELECT COALESCE(max(version),0)+1 AS version FROM ml_model_versions WHERE tenant_id=$1 AND registry_entry_id=$2", [principal.tenantId, registryId])).rows[0].version;
-      const m = await c.query("INSERT INTO ml_model_versions(tenant_id,registry_entry_id,training_run_id,artifact_id,version) VALUES($1,$2,$3,$4,$5) RETURNING *", [principal.tenantId, registryId, input.trainingRunId, attempt.rows[0].id, version]);
+      const m = await c.query("INSERT INTO ml_model_versions(tenant_id,registry_entry_id,training_run_id,artifact_id,version,registered_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [principal.tenantId, registryId, input.trainingRunId, attempt.rows[0].id, version, principal.userId]);
       await audit(c, principal.tenantId, principal.userId, "ml.model_registered", { modelVersionId: m.rows[0].id }); return m.rows[0];
     });
   }
-  async transition(principal: Principal, id: string, to: ModelState) {
+  /**
+   * READY is governed: the registry's current policy (metric thresholds, approval) and the artifact's integrity must hold.
+   * A refusal is recorded as a lifecycle event in its own committed step and then thrown as GovernanceRefusal (409).
+   */
+  async transition(principal: Principal, id: string, to: ModelState, reason?: string) {
     authorizeMl(principal, true);
-    return transaction(this.pool, async c => {
-      const selected = await c.query("SELECT m.*,a.content FROM ml_model_versions m JOIN ml_artifacts a ON a.tenant_id=m.tenant_id AND a.id=m.artifact_id WHERE m.tenant_id=$1 AND m.id=$2 FOR UPDATE OF m", [principal.tenantId, id]);
+    const outcome = await transaction(this.pool, async (c): Promise<{ row: Record<string, unknown> } | { refused: Reason[] }> => {
+      const selected = await c.query("SELECT m.* FROM ml_model_versions m WHERE m.tenant_id=$1 AND m.id=$2 FOR UPDATE OF m", [principal.tenantId, id]);
       if (!selected.rowCount) throw new NotFoundError("Model version not found"); const m = selected.rows[0]; assertModelTransition(m.status, to);
-      if (to === "READY") await this.artifacts.get(principal.tenantId, m.content);
+      let details: unknown = {};
+      if (to === "READY") {
+        const check = await new MlGovernanceService(this.pool, this.artifacts).evaluate(c, principal.tenantId, id);
+        if (check.reasons.length) {
+          await c.query("INSERT INTO ml_model_events(tenant_id,model_version_id,event,from_status,to_status,actor,reason,details) VALUES($1,$2,'transition_refused',$3,$4,$5,$6,$7)", [principal.tenantId, id, m.status, to, principal.userId, reason ?? null, JSON.stringify({ reasons: check.reasons, policyVersion: check.policyVersion })]);
+          await audit(c, principal.tenantId, principal.userId, "ml.model_transition_refused", { modelVersionId: id, to, reasons: check.reasons.map(r => r.code) });
+          return { refused: check.reasons };
+        }
+        details = { policyVersion: check.policyVersion, passed: check.passed };
+      }
+      await lifecycleContext(c, principal.userId, reason ?? null, details);
       const updated = await c.query("UPDATE ml_model_versions SET status=$1 WHERE tenant_id=$2 AND id=$3 RETURNING *", [to, principal.tenantId, id]);
       if (to === "RETIRED") await c.query("UPDATE ml_endpoints SET status='DISABLED' WHERE tenant_id=$1 AND model_version_id=$2 AND status='ACTIVE'", [principal.tenantId, id]);
-      await audit(c, principal.tenantId, principal.userId, "ml.model_transitioned", { modelVersionId: id, from: m.status, to }); return updated.rows[0];
+      await audit(c, principal.tenantId, principal.userId, "ml.model_transitioned", { modelVersionId: id, from: m.status, to }); return { row: updated.rows[0] };
     });
+    if ("refused" in outcome) throw new GovernanceRefusal(outcome.refused, "Model transition refused by governance");
+    return outcome.row;
   }
   async endpoint(principal: Principal, raw: unknown) {
     authorizeMl(principal, true); const input = EndpointInput.parse(raw);
