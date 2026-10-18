@@ -1,4 +1,4 @@
-# Machine learning (V1 lifecycle, Phases 2 to 4)
+# Machine learning (V1 lifecycle, Phases 2 to 5)
 
 Meticule's optional ML subsystem is a self-hosted machine-learning platform for tabular, time-series, text, image and audio data. You can:
 
@@ -9,9 +9,10 @@ Meticule's optional ML subsystem is a self-hosted machine-learning platform for 
 - build tenant-isolated pgvector embedding indexes and run exact similarity search;
 - run cross-validation, benchmarks, bounded hyperparameter search and AutoML;
 - resume interrupted neural training from durable checkpoints;
-- register and promote model versions, and serve version-pinned inference.
+- register and promote model versions, and serve version-pinned inference;
+- track experiments and lineage, mirror runs to MLflow, tune with Optuna, export verified ONNX models, govern promotion with policies and independent approval, deploy with validated revisions and rollback, monitor drift and render Matplotlib reports.
 
-Phase 2 (model catalog, cross-validation, benchmarks, hyperparameter search, bounded AutoML, ranking, richer preprocessing and metrics, explicit artifact compatibility) is described in [Phase 2](#phase-2-models-cross-validation-and-experiments). [Phase 3](#phase-3-neural-networks-durable-training-and-devices) adds neural backends, durable checkpointed training, explicit CPU/CUDA devices and mixed precision, all behind [Meticule ML Backend Contract v1](ml-backend-contract.md). [Phase 4](#phase-4-more-frameworks-modalities-and-retrieval) adds contract v2, five more backends, new tasks and modalities, and embedding retrieval. Each phase extends the V1 lifecycle below; nothing was replaced.
+Phase 2 (model catalog, cross-validation, benchmarks, hyperparameter search, bounded AutoML, ranking, richer preprocessing and metrics, explicit artifact compatibility) is described in [Phase 2](#phase-2-models-cross-validation-and-experiments). [Phase 3](#phase-3-neural-networks-durable-training-and-devices) adds neural backends, durable checkpointed training, explicit CPU/CUDA devices and mixed precision, all behind [Meticule ML Backend Contract v1](ml-backend-contract.md). [Phase 4](#phase-4-more-frameworks-modalities-and-retrieval) adds contract v2, five more backends, new tasks and modalities, and embedding retrieval. Phase 5 adds MLOps (experiment tracking and lineage, MLflow, Optuna, ONNX, registry governance, deployments, drift monitoring and reports), documented with its routes in [MLOps](ml-mlops.md). Each phase extends the V1 lifecycle below; nothing was replaced.
 
 ML extends Meticule's existing PostgreSQL run queue through `kind='ml'`. The agent executor, JWT authentication, tenant transactions and existing RLS boundary remain authoritative. Backend adapters compute; they never schedule work or change lifecycle state.
 
@@ -405,7 +406,7 @@ All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are
 | POST | `/ml/endpoints/:id/disable` | Disable a pinned endpoint |
 | POST | `/ml/endpoints/:id/predict` | `{rows:[...]}`; synchronous inference |
 | GET | `/ml/endpoints/:id/predictions` | Last 100 outcomes |
-| GET | `/ml/endpoints/:id/monitoring` | Last 24 hours: request/row counts, outcomes, error rate, average and p95 latency |
+| GET | `/ml/endpoints/:id/monitoring` | Last 24 hours: request/row counts, outcomes, error rate, failure categories, average, p50 and p95 latency |
 | GET | `/ml/models` | Model catalog and metric registry |
 | GET/POST | `/ml/benchmarks`, `/ml/searches`, `/ml/automl` | List / create experiments (202) |
 | GET | `/ml/benchmarks/:id`, `/ml/searches/:id`, `/ml/automl/:id` | Candidates, lineage, ranking, recommendation (404 for another kind) |
@@ -419,7 +420,7 @@ All `/ml/*` routes use existing authentication. Disabled ML returns 503. IDs are
 
 Prediction batches must follow the original dataset schema with its target omitted (forecasting history rows include it). The row cap depends on the task: 1,000 for classification, regression and anomaly detection, 5,000 history rows for forecasting, 256 for embeddings, 8 for transcription, and lower with media: 32 rows with an image column, 16 with audio, 64 for text embeddings. It is checked before any cell is decoded. Malformed schema definitions return 400, incompatible data/inference rows 409, backend inference failures 422 with a durable FAILED record, and management-role failures 403. Retiring a version disables its endpoints atomically.
 
-Monitoring includes disabled endpoints and uses persisted prediction outcomes. Error rate excludes pending requests; latency includes completed and failed requests. Empty windows return null rates/latencies. This operational summary complements reproducible training regression comparisons; it does not measure live model accuracy or data drift without labels or input-distribution observations.
+Monitoring includes disabled endpoints and uses persisted prediction outcomes. Error rate excludes pending requests; latency includes completed and failed requests. Empty windows return null rates/latencies. This operational summary complements reproducible training regression comparisons; it does not measure live model accuracy or data drift. Deployments add ground-truth feedback, per-version monitoring and drift evaluations ([MLOps](ml-mlops.md#monitoring-and-drift)).
 
 Registering the same completed attempt under the same entry is idempotent; a different attempt creates the next version, initially REGISTERED. Promoting a new version never retargets old endpoints. Comparisons require identical dataset content/schema, feature definition, seed, split specification and actual row indices, with matching metric names/directions. Algorithms/hyperparameters may differ. Comparison flags never promote automatically.
 
@@ -457,18 +458,19 @@ $env:ML_TEST_PYTHON=(Resolve-Path .tmp/ml-venv/Scripts/python.exe).Path
 npm run test:integration
 ```
 
-Real backend checks run when `ML_TEST_PYTHON` is set, and for the other backends when their variables are set: `ML_TEST_PYTORCH_PYTHON`, `ML_TEST_TENSORFLOW_PYTHON`, `ML_TEST_JAX_PYTHON`, `ML_TEST_XGBOOST_PYTHON` and `ML_TEST_LIGHTGBM_PYTHON` (one gbdt venv serves both), `ML_TEST_TRANSFORMERS_PYTHON`, and `ML_TEST_AUDIO_PYTHON` (the scikit-learn venv). Transformers tests generate tiny models offline with `tests/python/hf_fixtures.py`; no test downloads anything. Run the heavyweight framework files one process at a time on a machine with limited memory. CI runs separate jobs for TensorFlow, JAX, XGBoost/LightGBM and Transformers. The cross-backend pairs that need TensorFlow, JAX or Transformers together with another framework run only locally. The backend conformance suite in `tests/conformance` runs each configured backend against the contract, including every preprocessing operation and score type it declares. `tests/integration/ml-matrix.test.ts` compares all three frameworks on identical splits and folds; normal unit tests need no Python. The GitHub Actions workflow installs Python 3.13 and the pinned `ml/requirements.txt` and always sets it, and a CI-only test fails the job if it is missing, so the real runner is exercised on every push and pull request (a local run without the variable skips those tests). Tests cover PostgreSQL storage, JWT/RLS, attempts, cancellation/recovery, stale workers, atomic publication, all fifteen models, preprocessing, K-fold and stratified K-fold, fold-local fitting and leakage, reproducibility, benchmark/search/AutoML planning and execution, ranking direction and tie-breaks, partial failure, concurrency, artifact compatibility with a real V1 artifact, registry/version pins, inference schema errors, failed predictions, comparison, public authorization and tenant isolation, and migration safety. Existing integration tests are rerun to check agent behavior.
+Real backend checks run when `ML_TEST_PYTHON` is set, and for the other backends when their variables are set: `ML_TEST_PYTORCH_PYTHON`, `ML_TEST_TENSORFLOW_PYTHON`, `ML_TEST_JAX_PYTHON`, `ML_TEST_XGBOOST_PYTHON` and `ML_TEST_LIGHTGBM_PYTHON` (one gbdt venv serves both), `ML_TEST_TRANSFORMERS_PYTHON`, `ML_TEST_AUDIO_PYTHON` (the scikit-learn venv), and `ML_TEST_MLOPS_PYTHON` (`ml/requirements-mlops.txt`; the MLflow tests also need `mlflow==3.16.1` in it to start a local tracking server). Transformers tests generate tiny models offline with `tests/python/hf_fixtures.py`; no test downloads anything. Run the heavyweight framework files one process at a time on a machine with limited memory. CI runs separate jobs for TensorFlow, JAX, XGBoost/LightGBM, Transformers and the MLOps runners. The cross-backend pairs that need TensorFlow, JAX or Transformers together with another framework run only locally. The backend conformance suite in `tests/conformance` runs each configured backend against the contract, including every preprocessing operation and score type it declares. `tests/integration/ml-matrix.test.ts` compares all three frameworks on identical splits and folds; normal unit tests need no Python. The GitHub Actions workflow installs Python 3.13 and the pinned `ml/requirements.txt` and always sets it, and a CI-only test fails the job if it is missing, so the real runner is exercised on every push and pull request (a local run without the variable skips those tests). Tests cover PostgreSQL storage, JWT/RLS, attempts, cancellation/recovery, stale workers, atomic publication, all fifteen models, preprocessing, K-fold and stratified K-fold, fold-local fitting and leakage, reproducibility, benchmark/search/AutoML planning and execution, ranking direction and tie-breaks, partial failure, concurrency, artifact compatibility with a real V1 artifact, registry/version pins, inference schema errors, failed predictions, comparison, public authorization and tenant isolation, and migration safety. Existing integration tests are rerun to check agent behavior.
 
 ## Deferred scope
 
 Deferred:
 
-- further framework adapters, ONNX export and a plugin SDK;
+- further framework adapters, ONNX export beyond scikit-learn, and a plugin SDK;
 - encoder fine-tuning and PEFT/LoRA, multivariate forecasting, approximate vector indexes and model downloads;
 - streaming or large artifacts beyond the 16 MB blob cap, and signed artifacts;
-- high-throughput serving, GPU execution for the Phase 4 backends, and GPU scheduling;
-- repeated CV, and Bayesian or multi-stage AutoML;
-- distributed or remote training, fine-tuning and drift monitoring.
+- high-throughput serving, separate serving processes, traffic splitting and canary rollout, GPU execution for the Phase 4 backends, and GPU scheduling;
+- repeated CV, Bayesian or multi-stage AutoML, and Optuna pruning;
+- distributed or remote training and fine-tuning;
+- drift tests on raw values (Kolmogorov-Smirnov) and drift on text, timestamp and media features.
 
 A public plugin SDK for third-party backends is not offered; the backend contract is internal.
 
