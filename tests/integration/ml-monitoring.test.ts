@@ -55,6 +55,7 @@ describe("Phase 5 monitoring and drift", () => {
     await expect(s.monitoring.evaluateDrift(manager, s.d.id, { from: "2026-01-02T00:00:00Z", to: "2026-01-01T00:00:00Z" })).rejects.toThrow(/precede/);
     await expect(s.monitoring.evaluateDrift(manager, s.d.id, { from: "2026-01-01T00:00:00Z", to: "2026-03-01T00:00:00Z" })).rejects.toThrow(/31 days/);
     await expect(s.monitoring.evaluateDrift(viewer, s.d.id, {})).rejects.toThrow(/role/);
+    await expect(s.monitoring.evaluateDrift(manager, s.d.id, { modelVersionId: s.f.attempt.id })).rejects.toThrow(/not part of this deployment/);
     await expect(s.monitoring.evaluateDrift(outsider, s.d.id, {})).rejects.toThrow(/not found/);
     // Retention: the owner role prunes profiles; evaluations keep their evidence.
     expect(Number((await pool.query("SELECT ml_prune_monitoring('0 seconds')")).rows[0].ml_prune_monitoring)).toBe(7);

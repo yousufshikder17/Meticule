@@ -18,6 +18,7 @@ import { runSchedulerCycle } from "./scheduler-cycle.js";
 import { mlConfiguration } from "../ml/configuration.js";
 import { TrainingProcessor } from "../ml/training-processor.js";
 import { PostgresArtifactStore } from "../ml/artifact-store.js";
+import { MlExperimentService } from "../ml/experiments.js";
 
 const config = loadConfig();
 const pool = getPool();
@@ -34,6 +35,10 @@ const operations = new OperationalService(pool, providers);
 const roles = config.WORKER_ROLES.split(",").map((role) => role.trim()).filter(Boolean);
 const worker = new LifecycleWorker(pool, { workerId: config.WORKER_ID, leaseSeconds: config.LEASE_SECONDS }, { execute: (runId, workerId) => loop.execute(runId, workerId, roles) }, logger);
 const ml = mlConfiguration();
+const studies = ml.enabled && ml.optuna ? new MlExperimentService(pool, new PostgresArtifactStore(pool), ml.backends, { optuna: ml.optuna }) : null;
+let lastSweep = 0;
+// Optuna studies normally advance when a trial ends; this bounded sweep (every 30 s) covers failed asks and time limits.
+const sweepStudies = async (): Promise<boolean> => { if (studies && Date.now() - lastSweep >= 30_000) { lastSweep = Date.now(); await studies.sweepStudies(); } return false; };
 const mlWorker = ml.enabled ? new LifecycleWorker(pool, { workerId: `${config.WORKER_ID}:ml`, leaseSeconds: config.LEASE_SECONDS, kind: "ml" }, new TrainingProcessor(pool, new PostgresArtifactStore(pool), ml.backends, { optuna: ml.optuna }), logger) : null;
 let stopping = false;
 const requestStop = (): void => { stopping = true; void operations.heartbeat(config.WORKER_ID, "worker", { roles, pid: process.pid }, true).catch((error) => logger.log("error", "worker.drain_signal_failed", { workerId: config.WORKER_ID, error })); };
@@ -50,6 +55,7 @@ while (!stopping) {
       () => reconciler.reconcileNext(`${config.WORKER_ID}:reconciler`, config.LEASE_SECONDS),
       () => worker.tick(),
       () => mlWorker?.tick() ?? Promise.resolve(false),
+      sweepStudies,
     ], () => stopping);
     if (!progressed && !stopping) await delay(config.WORKER_POLL_MS);
   }

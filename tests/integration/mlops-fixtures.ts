@@ -44,7 +44,8 @@ export async function dropBlob(tenantId: string, sha256: string): Promise<void> 
   try { await c.query("ALTER TABLE ml_blobs DISABLE TRIGGER ml_blob_append_only"); await c.query("DELETE FROM ml_blobs WHERE tenant_id=$1 AND content_hash=$2", [tenantId, sha256]); }
   finally { await c.query("ALTER TABLE ml_blobs ENABLE TRIGGER ml_blob_append_only"); c.release(); }
 }
-export const truncate = () => pool.query("TRUNCATE ml_dataset_schemas,ml_datasets,ml_feature_pipelines,ml_experiments,ml_registry_entries,runs,agents CASCADE");
+// ml_reports references records only by id (in its sources), so no foreign key cascades to it; it is listed explicitly.
+export const truncate = () => pool.query("TRUNCATE ml_dataset_schemas,ml_datasets,ml_feature_pipelines,ml_experiments,ml_registry_entries,ml_reports,runs,agents CASCADE");
 
 export async function trainedModel(store: PostgresArtifactStore, backend: MlBackend = new LinearTestBackend(), options: { alpha?: number; rows?: number; algorithm?: string } = {}) {
   const backends = new Map([[backend.id, backend]]);

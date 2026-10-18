@@ -65,11 +65,14 @@ def inspect(data):
             refuse("ONNX opset is outside the supported range")
     operators = set()
     for g in graphs(model.graph):
-        for tensor in g.initializer:
-            if tensor.data_location == onnx.TensorProto.EXTERNAL:
-                refuse("ONNX external data is not allowed")
+        tensors = [*g.initializer, *(s.values for s in g.sparse_initializer), *(s.indices for s in g.sparse_initializer)]
         for node in g.node:
             operators.add((node.domain or "", node.op_type))
+            for attribute in node.attribute:
+                tensors += [attribute.t] if attribute.HasField("t") else []
+                tensors += list(attribute.tensors) + [s.values for s in attribute.sparse_tensors] + ([attribute.sparse_tensor.values] if attribute.HasField("sparse_tensor") else [])
+        if any(t.data_location == onnx.TensorProto.EXTERNAL or len(t.external_data) for t in tensors):
+            refuse("ONNX external data is not allowed")
     if not operators <= ALLOWED_OPS:
         refuse("ONNX model uses an operator outside the allowlist")
     try:

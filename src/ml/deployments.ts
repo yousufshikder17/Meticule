@@ -17,7 +17,7 @@ const Name = z.string().trim().min(1).max(120);
 const Reason = z.string().trim().min(1).max(1000).optional();
 export const DeploymentInput = z.strictObject({ name: Name });
 export const RevisionInput = z.strictObject({ modelVersionId: z.uuid(), runtime: z.enum(["native", "onnx"]).default("native"), onnxExportId: z.uuid().optional(), allowSchemaChange: z.boolean().default(false), reason: Reason });
-export const ActivationInput = z.strictObject({ revision: z.int().positive().optional(), reason: Reason });
+export const ActivationInput = z.strictObject({ revision: z.int().positive().optional(), allowSchemaChange: z.boolean().default(false), reason: Reason });
 /** Rows of the training run's test partition used for the readiness inference check. Never client data. */
 const SMOKE_ROWS = 8;
 export interface DeploymentOptions { onnx?: OnnxConfig | null | undefined }
@@ -83,7 +83,9 @@ export class MlDeploymentService {
       return { revision, exportId, activeRevision: d.active_revision as number | null };
     });
     if ("refused" in added) throw new GovernanceRefusal(added.refused, "Deployment revision refused");
-    const { reasons, evidence } = await this.validate(principal.tenantId, id, input, added.exportId, added.activeRevision, signal);
+    // Any unexpected error is a failed validation, so the revision always leaves VALIDATING.
+    const { reasons, evidence } = await this.validate(principal.tenantId, id, input, added.exportId, added.activeRevision, signal)
+      .catch((error: unknown) => ({ reasons: [{ code: "inference_check_failed", detail: { category: failureCategory(error, "prediction_failed") } }] as Reason[], evidence: { error: "validation_error" } }));
     const result = await transaction(this.pool, async c => {
       const d = await this.lock(c, principal.tenantId, id);
       const status = reasons.length ? "FAILED" : "READY";
@@ -111,10 +113,9 @@ export class MlDeploymentService {
     return transaction(this.pool, async c => {
       const d = await this.lock(c, principal.tenantId, id);
       if (d.status !== "ACTIVE") throw new ConflictError("Deployment is not active");
-      // The endpoint trigger moves the deployment to INACTIVE and records the event with this actor and reason.
+      // The endpoint trigger moves the deployment to INACTIVE and records the deployment and model events with this actor and reason.
       await lifecycleContext(c, principal.userId, input.reason ?? "deactivated");
       await c.query("UPDATE ml_endpoints SET status='DISABLED' WHERE tenant_id=$1 AND id=$2", [principal.tenantId, d.active_endpoint_id]);
-      await this.modelEvent(c, principal, d, "deactivated");
       await audit(c, principal.tenantId, principal.userId, "ml.deployment_deactivated", { deploymentId: id });
       return (await c.query("SELECT * FROM ml_deployments WHERE id=$1", [id])).rows[0];
     });
@@ -146,6 +147,9 @@ export class MlDeploymentService {
       if (r.revision === d.active_revision) throw new ConflictError("Revision is already active");
       // Eligibility can change after validation (a retired model, a stricter policy, a removed runtime): check it again.
       const reasons = await this.eligibility(c, principal.tenantId, r.model_version_id, r.runtime);
+      // The input contract is checked against the revision that served last, even when nothing serves right now.
+      const last = (await c.query("SELECT revision FROM ml_deployment_events WHERE tenant_id=$1 AND deployment_id=$2 AND event IN ('activated','rolled_back') ORDER BY created_at DESC,id DESC LIMIT 1", [principal.tenantId, id])).rows[0]?.revision as number | undefined;
+      if (last !== undefined && last !== r.revision && !input.allowSchemaChange && canonicalJson(await this.signatureOf(c, principal.tenantId, id, last)) !== canonicalJson(await this.signatureOf(c, principal.tenantId, id, r.revision))) reasons.push({ code: "input_schema_incompatible", detail: { lastServedRevision: last } });
       if (reasons.length) {
         await this.event(c, principal, id, "refused", d.status, d.status, r.revision, input.reason, { reasons, action: kind });
         return { refused: reasons };
@@ -210,6 +214,10 @@ export class MlDeploymentService {
     return pick.map(row => Object.fromEntries(Object.entries(row).filter(([k]) => task === "forecasting" || k !== target)) as Row);
   }
 
+  private async signatureOf(db: pg.Pool | pg.PoolClient, tenantId: string, id: string, revision: number) {
+    const row = (await db.query("SELECT t.snapshot FROM ml_deployment_revisions r JOIN ml_model_versions m ON m.tenant_id=r.tenant_id AND m.id=r.model_version_id JOIN ml_training_runs t ON t.tenant_id=m.tenant_id AND t.id=m.training_run_id WHERE r.tenant_id=$1 AND r.deployment_id=$2 AND r.revision=$3", [tenantId, id, revision])).rows[0];
+    return inputSignature(TrainingSnapshot.parse(row.snapshot));
+  }
   private async lock(c: pg.PoolClient, tenantId: string, id: string) {
     const d = (await c.query("SELECT * FROM ml_deployments WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, id])).rows[0];
     if (!d) throw new NotFoundError("Deployment not found"); return d;

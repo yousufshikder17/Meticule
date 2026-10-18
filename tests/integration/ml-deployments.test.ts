@@ -57,6 +57,7 @@ describe("Phase 5 deployment lifecycle", () => {
     await f.models.transition(manager, v2.id, "RETIRED", "superseded");
     expect((await deployments.get(manager, d.id)).deployment).toMatchObject({ status: "INACTIVE", active_endpoint_id: null });
     expect(await codes(deployments.activate(manager, d.id, { revision: 3 }))).toEqual(["model_not_ready"]);
+    expect((await pool.query("SELECT actor,reason,details->>'action' AS action FROM ml_model_events WHERE model_version_id=$1 AND event='deployment_changed' ORDER BY created_at DESC LIMIT 1", [v2.id])).rows[0]).toEqual({ actor: manager.userId, reason: "superseded", action: "deactivated" });
     const history = (await deployments.get(viewer, d.id)).events;
     expect(history.map(e => e.event)).toEqual(["created", "revision_added", "validation_failed", "revision_added", "validated", "activated", "revision_added", "validated", "activated", "rolled_back", "deactivated", "activated", "deactivated", "refused"]);
     expect(history.find(e => e.event === "rolled_back")).toMatchObject({ revision: 2, actor: manager.userId, reason: "regression in v2", details: { previousRevision: 3 } });
@@ -97,6 +98,10 @@ describe("Phase 5 deployment lifecycle", () => {
     expect(traced.traced).toMatchObject({ revision: 1, serving: true });
     expect(traced.model!.upstream.experiment.id).toBe(f.experiment.id); expect(traced.model!.upstream.datasetVersion.id).toBe(f.dataset.id);
     expect(traced.model!.downstream.deployments.map(x => x.deployment_id)).toContain(d.id);
+    // With nothing serving, the input contract is still checked against the revision that served last.
+    await deployments.deactivate(manager, d.id, {});
+    expect(await codes(deployments.activate(manager, d.id, { revision: 3 }))).toEqual(["input_schema_incompatible"]);
+    expect((await deployments.activate(manager, d.id, { revision: 3, allowSchemaChange: true })).active_revision).toBe(3);
   }));
 });
 

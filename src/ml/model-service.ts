@@ -73,6 +73,9 @@ export class MlModelService {
     return transaction(this.pool, async c => {
       const m = await c.query("SELECT id FROM ml_model_versions WHERE tenant_id=$1 AND id=$2 AND status='READY' FOR SHARE", [principal.tenantId, input.modelVersionId]);
       if (!m.rowCount) throw new ConflictError("Endpoint requires a READY model version");
+      // The same eligibility as a deployment: the registry's current policy and the artifact's integrity still hold.
+      const check = await new MlGovernanceService(this.pool, this.artifacts).evaluate(c, principal.tenantId, input.modelVersionId);
+      if (check.reasons.length) throw new GovernanceRefusal(check.reasons, "Endpoint refused by governance");
       const e = await c.query("INSERT INTO ml_endpoints(tenant_id,name,model_version_id) VALUES($1,$2,$3) RETURNING *", [principal.tenantId, input.name, input.modelVersionId]);
       await audit(c, principal.tenantId, principal.userId, "ml.endpoint_created", { endpointId: e.rows[0].id, modelVersionId: input.modelVersionId }); return e.rows[0];
     });
@@ -80,6 +83,7 @@ export class MlModelService {
   async disableEndpoint(principal: Principal, id: string) {
     authorizeMl(principal, true);
     return transaction(this.pool, async c => {
+      await lifecycleContext(c, principal.userId, "endpoint disabled");
       const e = await c.query("UPDATE ml_endpoints SET status='DISABLED' WHERE tenant_id=$1 AND id=$2 RETURNING *", [principal.tenantId, id]);
       if (!e.rowCount) throw new NotFoundError("Endpoint not found");
       await audit(c, principal.tenantId, principal.userId, "ml.endpoint_disabled", { endpointId: id }); return e.rows[0];

@@ -53,12 +53,14 @@ def read(request):
     """Metadata only: parameters, latest metric values, user tags, status and times. Artifacts are never fetched."""
     if not RUN_ID.match(request["mlflowRunId"]):
         raise RunnerError("external_service_unavailable", "Invalid MLflow run id")
-    r = client(request["trackingUri"]).get_run(request["mlflowRunId"])
+    c = client(request["trackingUri"])
+    r = c.get_run(request["mlflowRunId"])
+    experiment_name = c.get_experiment(r.info.experiment_id).name
     text = lambda v: str(v)[:500]
     params = dict(sorted((text(k), text(v)) for k, v in r.data.params.items())[:MAX_IMPORTED])
     metrics = dict(sorted((text(k), float(v)) for k, v in r.data.metrics.items() if v == v and abs(v) != float("inf"))[:MAX_IMPORTED])
     tags = dict(sorted((text(k), text(v)) for k, v in r.data.tags.items() if not k.startswith("mlflow."))[:MAX_IMPORTED])
-    return {"run": {"runId": r.info.run_id, "experimentId": r.info.experiment_id, "name": text(r.info.run_name or ""), "status": r.info.status,
+    return {"experimentName": text(experiment_name), "tenantTag": r.data.tags.get("meticule.tenant_id"), "run": {"runId": r.info.run_id, "experimentId": r.info.experiment_id, "name": text(r.info.run_name or ""), "status": r.info.status,
                     "startTime": r.info.start_time, "endTime": r.info.end_time, "params": params, "metrics": metrics, "tags": tags}}
 
 

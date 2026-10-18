@@ -75,8 +75,16 @@ export class MlGovernanceService {
   async evaluate(db: pg.Pool | pg.PoolClient, tenantId: string, modelVersionId: string) {
     const m = (await db.query("SELECT m.*,a.content FROM ml_model_versions m JOIN ml_artifacts a ON a.tenant_id=m.tenant_id AND a.id=m.artifact_id WHERE m.tenant_id=$1 AND m.id=$2", [tenantId, modelVersionId])).rows[0];
     if (!m) throw new NotFoundError("Model version not found");
-    const p = (await db.query("SELECT version,policy FROM ml_registry_policies WHERE tenant_id=$1 AND registry_entry_id=$2 ORDER BY version DESC LIMIT 1", [tenantId, m.registry_entry_id])).rows[0];
-    const policy = RegistryPolicy.parse(p?.policy ?? {}), failed: Reason[] = [], passed: string[] = [];
+    // A version is held to every policy version in force since its registration: tightening applies to existing versions,
+    // relaxing applies only to versions registered afterwards. Otherwise a manager could relax requireApproval (or a
+    // threshold) for their own version and promote it. Register a new version to use a relaxed policy.
+    const versions = (await db.query(`SELECT version,policy,created_at<=$3 AS at_registration FROM ml_registry_policies WHERE tenant_id=$1 AND registry_entry_id=$2
+      AND version>=COALESCE((SELECT max(version) FROM ml_registry_policies WHERE tenant_id=$1 AND registry_entry_id=$2 AND created_at<=$3),0) ORDER BY version`, [tenantId, m.registry_entry_id, m.created_at])).rows;
+    const p = versions.at(-1), parsed = versions.map(v => RegistryPolicy.parse(v.policy)), keys = new Set<string>();
+    const policy: RegistryPolicyType = { minimumMetrics: parsed.flatMap(x => x.minimumMetrics).filter(r => !keys.has(JSON.stringify(r)) && keys.add(JSON.stringify(r))),
+      requireApproval: parsed.some(x => x.requireApproval), requireVerifiedOnnx: parsed.some(x => x.requireVerifiedOnnx) };
+    const registered = versions.filter(v => v.at_registration).at(-1);
+    const failed: Reason[] = [], passed: string[] = [];
     try { await this.artifacts.get(tenantId, m.content); passed.push("artifact_integrity"); } catch { failed.push({ code: "artifact_integrity_failed" }); }
     const metrics = (await db.query("SELECT name,partition,value,direction FROM ml_metrics WHERE tenant_id=$1 AND training_run_id=$2 AND fold IS NULL", [tenantId, m.training_run_id])).rows;
     for (const rule of policy.minimumMetrics) {
@@ -93,7 +101,7 @@ export class MlGovernanceService {
     if (policy.requireVerifiedOnnx) {
       if ((await db.query("SELECT 1 FROM ml_onnx_exports WHERE tenant_id=$1 AND model_version_id=$2 AND status='VERIFIED'", [tenantId, modelVersionId])).rowCount) passed.push("onnx_parity"); else failed.push({ code: "onnx_export_required" });
     }
-    return { modelVersion: { id: m.id, status: m.status, registryEntryId: m.registry_entry_id }, policyVersion: p?.version ?? null, policy, passed, reasons: failed, eligibleForReady: m.status === "REGISTERED" && failed.length === 0 };
+    return { modelVersion: { id: m.id, status: m.status, registryEntryId: m.registry_entry_id }, policyVersion: p?.version ?? null, registrationPolicyVersion: registered?.version ?? null, policy, passed, reasons: failed, eligibleForReady: m.status === "REGISTERED" && failed.length === 0 };
   }
 
   async readiness(principal: Principal, modelVersionId: string) { authorizeMl(principal); return this.evaluate(this.pool, principal.tenantId, modelVersionId); }

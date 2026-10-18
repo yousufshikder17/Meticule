@@ -169,8 +169,12 @@ export class MlMonitoringService {
   async evaluateDrift(principal: Principal, deploymentId: string, raw: unknown) {
     authorizeMl(principal, true); const input = DriftInput.parse(raw), window = this.window(input);
     const endpoints = await this.endpoints(principal.tenantId, deploymentId);
-    const version = input.modelVersionId ?? (await this.pool.query("SELECT r.model_version_id FROM ml_deployments d JOIN ml_deployment_revisions r ON r.tenant_id=d.tenant_id AND r.deployment_id=d.id WHERE d.tenant_id=$1 AND d.id=$2 ORDER BY (r.revision=d.active_revision) DESC NULLS LAST,r.revision DESC LIMIT 1", [principal.tenantId, deploymentId])).rows[0]?.model_version_id;
-    if (!version) throw new ConflictError("Deployment has no model version to evaluate");
+    // Only a version one of the deployment's revisions pins; by default the serving one, else the one that served last.
+    const version = (await this.pool.query(`SELECT r.model_version_id FROM ml_deployments d JOIN ml_deployment_revisions r ON r.tenant_id=d.tenant_id AND r.deployment_id=d.id
+      LEFT JOIN LATERAL (SELECT max(e.created_at) AS served FROM ml_deployment_events e WHERE e.tenant_id=d.tenant_id AND e.deployment_id=d.id AND e.revision=r.revision AND e.event IN ('activated','rolled_back')) s ON true
+      WHERE d.tenant_id=$1 AND d.id=$2 AND ($3::uuid IS NULL OR r.model_version_id=$3) AND ($3::uuid IS NOT NULL OR s.served IS NOT NULL)
+      ORDER BY (r.revision=d.active_revision) DESC NULLS LAST,s.served DESC NULLS LAST LIMIT 1`, [principal.tenantId, deploymentId, input.modelVersionId ?? null])).rows[0]?.model_version_id;
+    if (!version) throw new ConflictError(input.modelVersionId ? "The model version is not part of this deployment" : "The deployment has not served a model version yet");
     const reference = await this.reference(this.pool, principal.tenantId, version);
     if (!reference) throw new ConflictError("No drift reference can be built for this model version");
     const args = [principal.tenantId, version, endpoints, window.from, window.to];

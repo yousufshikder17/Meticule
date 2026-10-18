@@ -106,10 +106,10 @@ export class MlOnnxService {
     return (await this.pool.query("SELECT * FROM ml_onnx_exports WHERE tenant_id=$1 AND model_version_id=$2 ORDER BY created_at DESC,id LIMIT 100", [principal.tenantId, modelVersionId])).rows;
   }
 
-  /** The ONNX bytes of an export, re-verified against their checksum. Managers only: it is the model itself. */
+  /** The bytes of a VERIFIED export, re-verified against their checksum. Managers only: it is the model itself. */
   async content(principal: Principal, exportId: string) {
     authorizeMl(principal, true);
-    const e = (await this.pool.query("SELECT content FROM ml_onnx_exports WHERE tenant_id=$1 AND id=$2 AND content IS NOT NULL", [principal.tenantId, exportId])).rows[0];
+    const e = (await this.pool.query("SELECT content FROM ml_onnx_exports WHERE tenant_id=$1 AND id=$2 AND status='VERIFIED'", [principal.tenantId, exportId])).rows[0];
     if (!e) throw new NotFoundError("ONNX export not found");
     return this.artifacts.get(principal.tenantId, e.content);
   }

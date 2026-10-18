@@ -89,17 +89,17 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
   });
   app.post("/ml/model-versions/:id/transition", async c => {
     const input = ModelTransitionInput.parse(await c.req.json());
-    // A refusal is returned, not rethrown, so the recorded refusal event commits with the request.
+    // A refusal is answered with its reason codes; its event was recorded in its own committed step.
     try { return c.json(await new MlModelService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends, { onnx: ml.onnx }).transition(c.get("principal"), id(c.req.param("id")), input.status, input.reason)); }
     catch (error) { if (error instanceof GovernanceRefusal) return c.json({ error: "transition_refused", message: error.message, reasons: error.reasons }, 409); throw error; }
   });
   const governance = (database: pg.Pool) => new MlGovernanceService(database, new PostgresArtifactStore(database));
   const onnx = (database: pg.Pool) => { if (!ml.onnx) throw new FeatureDisabled("onnx"); return new MlOnnxService(database, new PostgresArtifactStore(database), ml.onnx); };
-  // An unsupported or out-of-tolerance export is a recorded outcome (422), returned so the record commits with the request.
+  // An unsupported or out-of-tolerance export is a recorded outcome (422), not an error.
   app.post("/ml/model-versions/:id/onnx-exports", async c => { const r = await onnx(c.get("database")).export(c.get("principal"), id(c.req.param("id")), c.req.raw.signal); return c.json(r, r.status === "VERIFIED" ? 201 : 422); });
   app.get("/ml/model-versions/:id/onnx-exports", async c => c.json(await onnx(c.get("database")).list(c.get("principal"), id(c.req.param("id")))));
   const deployments = (database: pg.Pool) => new MlDeploymentService(database, new PostgresArtifactStore(database), ml.backends, { onnx: ml.onnx });
-  // Refusals are answered here (not rethrown) so their recorded events commit with the request.
+  // Refusals are answered with their reason codes; their events were recorded in their own committed steps.
   const governed = async (c: { json: (body: unknown, status: 201 | 200 | 409) => Response }, work: () => Promise<unknown>, status: 200 | 201 = 200) => {
     try { return c.json(await work(), status); }
     catch (error) { if (error instanceof GovernanceRefusal) return c.json({ error: "refused", message: error.message, reasons: error.reasons }, 409); throw error; }

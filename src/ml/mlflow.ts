@@ -17,7 +17,7 @@ export const MlflowImportInput = z.strictObject({ experimentId: z.uuid(), mlflow
 // MLflow's own limits: parameter keys are word characters, '.', '-', ' ' and '/'; values at most 6000 characters.
 const PARAM_KEY = /^[\w.\- /]{1,250}$/;
 const ExportResponse = z.object({ runId: z.string().regex(/^[0-9a-f]{32}$/), experimentId: z.string().min(1).max(64), reused: z.boolean() });
-const ImportedRun = z.object({ run: z.object({
+const ImportedRun = z.object({ experimentName: z.string().max(500), tenantTag: z.string().max(100).nullable().optional(), run: z.object({
   runId: z.string().regex(/^[0-9a-f]{32}$/), experimentId: z.string().max(64), name: z.string().max(500), status: z.string().max(20),
   startTime: z.number().nullable(), endTime: z.number().nullable(),
   params: z.record(z.string().max(500), z.string().max(500)), metrics: z.record(z.string().max(500), z.number().finite()), tags: z.record(z.string().max(500), z.string().max(500)),
@@ -75,6 +75,9 @@ export class MlMlflowService {
     if (!(await this.pool.query("SELECT 1 FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.experimentId])).rowCount) throw new NotFoundError("Experiment not found");
     const parsed = ImportedRun.safeParse(await this.call("read", { mlflowRunId: input.mlflowRunId }, signal));
     if (!parsed.success) throw new MlBackendFailure("invalid_response", "MLflow runner response did not match the contract");
+    // A run Meticule exported for another tenant (by experiment name or identity tag) is not this tenant's to import.
+    const foreign = (parsed.data.experimentName.startsWith(`${this.config.prefix}/`) && !parsed.data.experimentName.startsWith(`${this.config.prefix}/${principal.tenantId}/`)) || (parsed.data.tenantTag != null && parsed.data.tenantTag !== principal.tenantId);
+    if (foreign) throw new NotFoundError("MLflow run not found");
     return transaction(this.pool, async c => {
       const inserted = await c.query("INSERT INTO ml_external_runs(tenant_id,experiment_id,source,tracking_uri_hash,external_run_id,document,imported_by) VALUES($1,$2,'mlflow',$3,$4,$5,$6) ON CONFLICT (tenant_id,experiment_id,tracking_uri_hash,external_run_id) DO NOTHING RETURNING *",
         [principal.tenantId, input.experimentId, this.uriHash, input.mlflowRunId, JSON.stringify(parsed.data.run), principal.userId]);

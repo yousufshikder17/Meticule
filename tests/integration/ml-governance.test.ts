@@ -39,29 +39,52 @@ describe("Phase 5 registry governance", () => {
       await expect(pool.query("INSERT INTO ml_model_approvals(tenant_id,model_version_id,decision,approver) VALUES($1,$2,'APPROVED',$3)", [manager.tenantId, version.id, service.userId])).rejects.toThrow(/service identity/);
     } finally { await pool.query("DELETE FROM tenant_memberships WHERE tenant_id=$1 AND identity_id=$2", [service.tenantId, service.userId]); }
     await governance.approve(approver, version.id, { decision: "APPROVED", note: "reviewed" });
+    // A later rejection withdraws the approval, and relaxing the policy does not help a version registered under it.
     await governance.setPolicy(manager, registry.id, { minimumMetrics: [{ name: "mae", partition: "test", threshold: .25 }], requireApproval: true });
-    // A later rejection withdraws the approval; a new approval restores it.
     await governance.approve(approver, version.id, { decision: "REJECTED", note: "regression found" });
-    expect(await refusal(f.models.transition(manager, version.id, "READY"))).toEqual(["approval_rejected"]);
-    await governance.approve(approver, version.id, { decision: "APPROVED" });
-    const ready = await f.models.transition(manager, version.id, "READY", "meets policy v2");
+    expect(await refusal(f.models.transition(manager, version.id, "READY"))).toEqual(["approval_rejected", "policy_metric_missing", "policy_metric_threshold"]);
+    // A version registered under the relaxed policy is held to it alone, and still needs another manager's approval.
+    // Public registration is idempotent per attempt, so it comes from a second attempt (same alpha, so the same mae).
+    const again = await f.training.queue(manager, { experimentId: f.experiment.id, spec: { ...f.spec, seed: 8 } }); await f.worker.tick();
+    const relaxed = await f.models.register(manager, registry.id, { trainingRunId: (await f.training.getJob(manager, again.id)).attempts[0].id });
+    expect(await refusal(f.models.transition(manager, relaxed.id, "READY"))).toEqual(["approval_required"]);
+    await governance.approve(approver, relaxed.id, { decision: "APPROVED" });
+    const ready = await f.models.transition(manager, relaxed.id, "READY", "meets policy v2");
     expect(ready.status).toBe("READY");
-    await expect(governance.approve(approver, version.id, { decision: "APPROVED" })).rejects.toThrow(/REGISTERED/);
-    const events = await governance.events(viewer, version.id);
-    expect(events.map(e => e.event)).toEqual(["registered", "transition_refused", "approved", "approval_rejected", "transition_refused", "approved", "transitioned"]);
+    await expect(governance.approve(approver, relaxed.id, { decision: "APPROVED" })).rejects.toThrow(/REGISTERED/);
+    expect((await governance.events(viewer, version.id)).map(e => e.event)).toEqual(["registered", "transition_refused", "approved", "approval_rejected", "transition_refused"]);
+    const events = await governance.events(viewer, relaxed.id);
+    expect(events.map(e => e.event)).toEqual(["registered", "transition_refused", "approved", "transitioned"]);
     const last = events.at(-1)!;
     expect(last).toMatchObject({ from_status: "REGISTERED", to_status: "READY", actor: manager.userId, reason: "meets policy v2", details: { policyVersion: 2 } });
-    expect(events[1].details.reasons.map((r: { code: string }) => r.code)).toContain("policy_metric_threshold");
+    expect((await governance.events(viewer, version.id))[1].details.reasons.map((r: { code: string }) => r.code)).toContain("policy_metric_threshold");
     // Lifecycle history is immutable and part of the version's lineage.
     await expect(pool.query("UPDATE ml_model_events SET reason='edited' WHERE id=$1", [last.id])).rejects.toThrow();
     await expect(pool.query("DELETE FROM ml_model_events WHERE id=$1", [last.id])).rejects.toThrow();
-    expect((await new MlLineageService(pool, store).modelVersion(manager, version.id)).lifecycle.map(e => e.event).at(-1)).toBe("transitioned");
+    expect((await new MlLineageService(pool, store).modelVersion(manager, relaxed.id)).lifecycle.map(e => e.event).at(-1)).toBe("transitioned");
     // Retirement is recorded by the trigger even without a reason.
-    await f.models.transition(manager, version.id, "RETIRED");
-    expect((await governance.events(manager, version.id)).at(-1)).toMatchObject({ event: "transitioned", from_status: "READY", to_status: "RETIRED", reason: null });
+    await f.models.transition(manager, relaxed.id, "RETIRED");
+    expect((await governance.events(manager, relaxed.id)).at(-1)).toMatchObject({ event: "transitioned", from_status: "READY", to_status: "RETIRED", reason: null });
     await expect(governance.events(outsider, version.id)).rejects.toThrow(/not found/);
     await expect(governance.setPolicy(outsider, registry.id, {})).rejects.toThrow(/not found/);
     await expect(governance.setPolicy(manager, registry.id, { minimumMetrics: [], unknown: true })).rejects.toThrow();
+  }));
+
+  it("does not let a relaxed policy promote versions registered under a stricter one, and governs new endpoints", () => withStore(async store => {
+    const f = await trainedModel(store), governance = new MlGovernanceService(pool, store);
+    const registry = await f.models.registry(manager, { name: "sticky" });
+    await governance.setPolicy(manager, registry.id, { requireApproval: true });
+    const version = await f.models.register(manager, registry.id, { trainingRunId: f.attempt.id });
+    await governance.setPolicy(manager, registry.id, { requireApproval: false }); // the registrant relaxes the policy
+    expect(await refusal(f.models.transition(manager, version.id, "READY"))).toEqual(["approval_required"]);
+    expect((await governance.readiness(manager, version.id)).registrationPolicyVersion).toBe(1);
+    // Public registration is idempotent per attempt, so the later version comes from a second attempt.
+    const retrain = await f.training.queue(manager, { experimentId: f.experiment.id, spec: { ...f.spec, hyperparameters: { alpha: 4 } } }); await f.worker.tick();
+    const later = await f.models.register(manager, registry.id, { trainingRunId: (await f.training.getJob(manager, retrain.id)).attempts[0].id });
+    expect((await f.models.transition(manager, later.id, "READY")).status).toBe("READY");
+    // Tightening applies to versions that are already READY: a new endpoint is refused like a deployment would be.
+    await governance.setPolicy(manager, registry.id, { minimumMetrics: [{ name: "mae", partition: "test", threshold: .001 }] });
+    await expect(f.models.endpoint(manager, { name: "e", modelVersionId: later.id })).rejects.toBeInstanceOf(GovernanceRefusal);
   }));
 
   it("keeps Phase 1 promotion without a policy, refuses a damaged artifact, and persists HTTP refusals", () => withStore(async store => {

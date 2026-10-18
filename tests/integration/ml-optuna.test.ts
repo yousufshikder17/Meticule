@@ -85,6 +85,20 @@ describe.runIf(Boolean(python))("Optuna studies", () => {
     expect(done.orchestration.status).toBe("COMPLETED"); expect(done.study!.trials).toHaveLength(2);
   }), 300_000);
 
+  it("lets the worker sweep advance and finalize a study whose terminal hook could not ask", () => withStore(async store => {
+    const f = await trainedModel(store); // f.worker has no Optuna configuration, like a misconfigured worker
+    const service = new MlExperimentService(pool, store, f.backends, { optuna });
+    const created = await service.optuna(manager, { name: "swept", experimentId: f.experiment.id, datasetVersionId: f.dataset.id, featurePipelineId: f.pipeline.id, backend: "test-p5", taskType: "regression", seed: 2,
+      evaluation: { primaryMetric: "mae" }, algorithm: "linear", space: { alpha: { type: "float", min: 0, max: 10 } }, maxTrials: 2 });
+    await f.worker.tick();
+    const stalled = await service.read(manager.tenantId, created.orchestration.id);
+    expect(stalled.orchestration.status).toBe("RUNNING"); expect(stalled.study!.trials).toHaveLength(1);
+    await service.sweepStudies();
+    expect((await service.read(manager.tenantId, created.orchestration.id)).study!.trials).toHaveLength(2);
+    await f.worker.tick(); await service.sweepStudies();
+    expect((await service.read(manager.tenantId, created.orchestration.id)).orchestration.status).toBe("COMPLETED");
+  }), 300_000);
+
   it("asks deterministically for a given history and seed, and refuses spaces outside the allowlist", () => withStore(async store => {
     const ask = (trials: unknown[]) => callRunner({ label: "optuna", python: python!, script: resolve("ml/optuna_runner.py"), timeoutMs: 60_000, signal: new AbortController().signal,
       request: { command: "ask", sampler: "tpe", direction: "minimize", seed: 5, space: { alpha: { type: "float", min: 0, max: 10 }, k: { type: "choice", values: ["a", "b"] } }, count: 2, trials } });

@@ -101,6 +101,14 @@ describe.runIf(Boolean(python))("MLflow interoperability against a real tracking
     expect((await service.import(manager, { experimentId: target.id, mlflowRunId: exported.mlflow_run_id }, signal())).reused).toBe(true);
     expect(await service.externalRuns(manager, target.id)).toHaveLength(1);
     await expect(service.import(manager, { experimentId: target.id, mlflowRunId: "../../etc" }, signal())).rejects.toThrow();
+    // Runs Meticule exported for another tenant are refused, by experiment name and by identity tag.
+    const foreignExperiment = (await api("/api/2.0/mlflow/experiments/create", { name: `meticule-test/${outsider.tenantId}/elsewhere` })).experiment_id;
+    const foreign = (await api("/api/2.0/mlflow/runs/create", { experiment_id: foreignExperiment })).run.info.run_id;
+    await expect(service.import(manager, { experimentId: target.id, mlflowRunId: foreign }, signal())).rejects.toThrow(/not found/);
+    const tagged = (await api("/api/2.0/mlflow/runs/create", { experiment_id: "0", tags: [{ key: "meticule.tenant_id", value: outsider.tenantId }] })).run.info.run_id;
+    await expect(service.import(manager, { experimentId: target.id, mlflowRunId: tagged }, signal())).rejects.toThrow(/not found/);
+    const external = (await api("/api/2.0/mlflow/runs/create", { experiment_id: "0" })).run.info.run_id;
+    expect((await service.import(manager, { experimentId: target.id, mlflowRunId: external }, signal())).reused).toBe(false);
     await expect(service.import(outsider, { experimentId: target.id, mlflowRunId: exported.mlflow_run_id }, signal())).rejects.toThrow(/not found/);
     const app = testApp(store, f.backends, manager, { mlflow: config() });
     expect((await app.request("/ml/mlflow/imports", json({ experimentId: target.id, mlflowRunId: "0".repeat(32) }))).status).toBe(502);

@@ -291,6 +291,16 @@ export class MlExperimentService {
       await audit(c, tenantId, "system", "ml.experiment_finalized", { orchestrationId: id, status: outcome.status, counts: outcome.counts }, null, "worker");
     });
   }
+  /**
+   * Worker sweep: advances or finalizes running Optuna studies (oldest first, at most `limit`), so a study whose ask failed
+   * with nothing running, or whose time limit passed, does not wait for a reader. Never throws.
+   */
+  async sweepStudies(limit = 10): Promise<void> {
+    try {
+      for (const o of (await this.pool.query("SELECT tenant_id,id FROM ml_orchestrations WHERE kind='optuna' AND status='RUNNING' ORDER BY created_at LIMIT $1", [limit])).rows) await this.refresh(o.tenant_id, o.id).catch(() => undefined);
+    } catch { /* retried on the next sweep */ }
+  }
+
   /** Worker hook: a job reached a terminal state, so any experiment containing it may now be final. Never throws. */
   async onJobTerminal(runId: string): Promise<void> {
     try {
