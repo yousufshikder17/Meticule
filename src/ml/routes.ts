@@ -18,6 +18,7 @@ import { MlMlflowService } from "./mlflow.js";
 import { GovernanceRefusal, MlGovernanceService } from "./governance.js";
 import { MlOnnxService } from "./onnx.js";
 import { MlDeploymentService } from "./deployments.js";
+import { MlMonitoringService } from "./monitoring.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export { FeatureDisabled } from "./persistence.js";
@@ -114,6 +115,11 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
     const record = await deployments(c.get("database")).predict(c.get("principal"), id(c.req.param("id")), z.object({ rows: z.unknown() }).parse(await c.req.json()).rows, c.req.raw.signal);
     return c.json(record, record.status === "FAILED" ? 422 : 200);
   });
+  const monitoring = (database: pg.Pool) => new MlMonitoringService(database, new PostgresArtifactStore(database));
+  app.get("/ml/deployments/:id/monitoring", async c => c.json(await monitoring(c.get("database")).monitor(c.get("principal"), id(c.req.param("id")), c.req.query())));
+  app.post("/ml/deployments/:id/drift-evaluations", async c => c.json(await monitoring(c.get("database")).evaluateDrift(c.get("principal"), id(c.req.param("id")), await c.req.json().catch(() => ({}))), 201));
+  app.get("/ml/deployments/:id/drift-evaluations", async c => c.json(await monitoring(c.get("database")).evaluations(c.get("principal"), id(c.req.param("id")))));
+  app.post("/ml/predictions/:id/feedback", async c => c.json(await monitoring(c.get("database")).feedback(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
   app.get("/ml/lineage/deployments/:id", async c => c.json(await lineage(c.get("database")).deployment(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
   app.get("/ml/onnx-exports/:id/content", async c => c.body(new Uint8Array(await onnx(c.get("database")).content(c.get("principal"), id(c.req.param("id")))), 200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=model.onnx" }));
   app.put("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).setPolicy(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));

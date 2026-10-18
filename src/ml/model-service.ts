@@ -9,6 +9,7 @@ import { TrainingSnapshot, assertModelTransition, cohortKey, compareMetrics, val
 import { audit, authorizeMl, transaction } from "./persistence.js";
 import { GovernanceRefusal, lifecycleContext, MlGovernanceService, type Reason } from "./governance.js";
 import { MlOnnxService, type OnnxConfig } from "./onnx.js";
+import { MlMonitoringService } from "./monitoring.js";
 import { getModel } from "./model-catalog.js";
 import { TASKS, embeddingDimension, maxPredictionRows, predictionCount, validatePredictions } from "./tasks.js";
 
@@ -95,8 +96,13 @@ export class MlModelService {
       (count(p.id) FILTER (WHERE p.status='FAILED'))::float8 /
         NULLIF(count(p.id) FILTER (WHERE p.status IN ('COMPLETED','FAILED')),0) AS error_rate,
       avg(p.latency_ms) FILTER (WHERE p.status IN ('COMPLETED','FAILED'))::float8 AS average_latency_ms,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY p.latency_ms)
+        FILTER (WHERE p.status IN ('COMPLETED','FAILED')) AS p50_latency_ms,
       percentile_cont(0.95) WITHIN GROUP (ORDER BY p.latency_ms)
-        FILTER (WHERE p.status IN ('COMPLETED','FAILED')) AS p95_latency_ms
+        FILTER (WHERE p.status IN ('COMPLETED','FAILED')) AS p95_latency_ms,
+      COALESCE((SELECT jsonb_object_agg(f.category,f.n) FROM (SELECT COALESCE(x.failure->>'category','unknown') AS category,count(*)::int AS n
+        FROM ml_predictions x WHERE x.tenant_id=e.tenant_id AND x.endpoint_id=e.id AND x.status='FAILED'
+          AND x.created_at BETWEEN now()-interval '24 hours' AND now() GROUP BY 1) f),'{}') AS failures_by_category
       FROM ml_endpoints e LEFT JOIN ml_predictions p ON p.tenant_id=e.tenant_id AND p.endpoint_id=e.id
         AND p.created_at BETWEEN now()-interval '24 hours' AND now()
       WHERE e.tenant_id=$1 AND e.id=$2 GROUP BY e.id,e.model_version_id,e.status`, [principal.tenantId, endpointId]);
@@ -124,7 +130,9 @@ export class MlModelService {
       const backend = this.backends.get(snapshot.backend);
       if (model.runtime === "onnx" ? !this.options.onnx : !backend) throw new ConflictError("Inference backend is not configured");
       const p = await c.query("INSERT INTO ml_predictions(tenant_id,endpoint_id,model_version_id,input_hash,count) VALUES($1,$2,$3,$4,$5) RETURNING *", [principal.tenantId, endpointId, model.model_version_id, canonicalJsonHash(rows), rows.length]);
-      return { record: p.rows[0], model, snapshot, rows, backend, definition };
+      // Monitoring compares bin counts with the version's training reference (built once, on first use); raw rows are not kept.
+      const reference = await new MlMonitoringService(this.pool, this.artifacts).reference(c, principal.tenantId, model.model_version_id);
+      return { record: p.rows[0], model, snapshot, rows, backend, definition, reference };
     });
     const started = Date.now(); let output: unknown[] | null = null; let failure: { code: string; category: string; message: string } | null = null;
     try {
@@ -141,6 +149,7 @@ export class MlModelService {
       const embedding = pending.definition.taskType === "embedding" && output !== null;
       const stored = embedding ? { digest: canonicalJsonHash(output), shape: [pending.rows.length, embeddingDimension(pending.model.environment)] } : output;
       const p = await c.query("UPDATE ml_predictions SET status=$1,latency_ms=$2,output=$3,failure=$4 WHERE tenant_id=$5 AND id=$6 AND status='PENDING' RETURNING *", [failure ? "FAILED" : "COMPLETED", Date.now() - started, stored ? JSON.stringify(stored) : null, failure ? JSON.stringify(failure) : null, principal.tenantId, pending.record.id]);
+      if (output !== null && pending.reference) await new MlMonitoringService(this.pool, this.artifacts).record(c, principal.tenantId, p.rows[0], pending.reference, pending.rows, output);
       await audit(c, principal.tenantId, principal.userId, "ml.prediction_recorded", { predictionId: pending.record.id, status: p.rows[0].status, endpointId });
       return embedding ? { ...p.rows[0], vectors: output } : p.rows[0];
     });
