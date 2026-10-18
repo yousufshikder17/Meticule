@@ -123,7 +123,8 @@ There is no pruning (trials report no intermediate values), and only the TPE and
   service identities can never approve: an approval is a person's decision. Both rules are enforced by the service and by a
   database trigger.
 - Versions registered before migration `011` recover their registrant from the `ml.model_registered` audit event written at
-  registration. A version without such an event keeps no registrant, and separation of duties cannot apply to it.
+  registration. A version without such an event keeps no registrant and can never be approved, because independence cannot
+  be shown; register it again from a new attempt.
 - `GET /ml/model-versions/:id/readiness` explains what passes and what is missing.
 - `REGISTERED -> READY` evaluates the policy and the artifact's integrity under the version's row lock. A refusal is
   recorded with reason codes and answered 409 `{reasons}`. Without a policy, earlier promotion behavior is unchanged.
@@ -137,8 +138,11 @@ Reason codes: `artifact_integrity_failed`, `policy_metric_missing`, `policy_metr
 `approval_rejected`, `onnx_export_required`, `model_not_ready`, `backend_unavailable`, `inference_check_failed`,
 `input_schema_incompatible`.
 
-Meticule trusts the identity provider that signs its tokens to give each person one stable subject. It cannot tell when
-one person holds two user identities.
+Approval is opt-in per registry entry: only entries whose policy sets `requireApproval` need it, and any `tenant_admin` can
+create a new entry without a policy and promote a version there. Governance makes promotion decisions explicit and recorded;
+it is not a tenant-wide control that one administrator cannot avoid. Meticule also trusts the identity provider that signs
+its tokens to give each person one stable subject: it cannot tell when one person holds two identities (for example a
+service membership a tenant admin created and obtained a token for).
 
 ## ONNX export and ONNX Runtime
 
@@ -200,7 +204,10 @@ canary rollout, autoscaling or GPU fleet behind a deployment.
   numeric features, the 20 most frequent values plus "other" for string and boolean features, a null bucket for each, and
   the target as the output reference (bins for regression, labels for classification). Text, timestamp and media features
   are not profiled.
-- Every completed prediction stores only its counts per reference bin. Raw inputs are never stored.
+- Every completed prediction stores only its counts per reference bin. Raw inputs are never stored. The reference profile
+  itself summarizes the training data (numeric decile edges and the 20 most frequent values of each string or boolean
+  feature), and drift evaluations return it to every member of the tenant; do not enable drift monitoring on features
+  whose frequent values members must not see.
 - `POST /ml/deployments/:id/drift-evaluations {modelVersionId?, from?, to?, minSamples=100, thresholds}` evaluates a
   version pinned by one of the deployment's revisions (by default the serving one, else the one that served last) and
   compares the window (default the last 24 hours, at most 31 days) with the reference, per feature and for the output:

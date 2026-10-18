@@ -93,10 +93,15 @@ describe.runIf(Boolean(python))("Optuna studies", () => {
     await f.worker.tick();
     const stalled = await service.read(manager.tenantId, created.orchestration.id);
     expect(stalled.orchestration.status).toBe("RUNNING"); expect(stalled.study!.trials).toHaveLength(1);
-    await service.sweepStudies();
+    // An older study whose trial is still open needs nothing from the sweep, so it cannot take the only sweep slot.
+    const busy = await service.optuna(manager, { name: "busy", experimentId: f.experiment.id, datasetVersionId: f.dataset.id, featurePipelineId: f.pipeline.id, backend: "test-p5", taskType: "regression", seed: 3,
+      evaluation: { primaryMetric: "mae" }, algorithm: "linear", space: { alpha: { type: "float", min: 0, max: 10 } }, maxTrials: 1 });
+    await pool.query(`ALTER TABLE ml_orchestrations DISABLE TRIGGER ml_orchestration_update; UPDATE ml_orchestrations SET created_at=created_at-interval '1 minute' WHERE id='${busy.orchestration.id}'; ALTER TABLE ml_orchestrations ENABLE TRIGGER ml_orchestration_update`);
+    await service.sweepStudies(1);
     expect((await service.read(manager.tenantId, created.orchestration.id)).study!.trials).toHaveLength(2);
-    await f.worker.tick(); await service.sweepStudies();
+    while (await f.worker.tick()); await service.sweepStudies();
     expect((await service.read(manager.tenantId, created.orchestration.id)).orchestration.status).toBe("COMPLETED");
+    expect((await service.read(manager.tenantId, busy.orchestration.id)).orchestration.status).toBe("COMPLETED");
   }), 300_000);
 
   it("asks deterministically for a given history and seed, and refuses spaces outside the allowlist", () => withStore(async store => {

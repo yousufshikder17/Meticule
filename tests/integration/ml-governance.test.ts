@@ -38,6 +38,13 @@ describe("Phase 5 registry governance", () => {
       await expect(governance.approve(service, version.id, { decision: "APPROVED" })).rejects.toThrow(/Service identities/);
       await expect(pool.query("INSERT INTO ml_model_approvals(tenant_id,model_version_id,decision,approver) VALUES($1,$2,'APPROVED',$3)", [manager.tenantId, version.id, service.userId])).rejects.toThrow(/service identity/);
     } finally { await pool.query("DELETE FROM tenant_memberships WHERE tenant_id=$1 AND identity_id=$2", [service.tenantId, service.userId]); }
+    // Public: a version with no recorded registrant (registered before registrants were recorded) can never be approved.
+    const setRegistrant = (who: string | null) => pool.query(`ALTER TABLE ml_model_versions DISABLE TRIGGER ml_model_registrant; UPDATE ml_model_versions SET registered_by=${who ? `'${who}'` : "NULL"} WHERE id='${version.id}'; ALTER TABLE ml_model_versions ENABLE TRIGGER ml_model_registrant`);
+    await setRegistrant(null);
+    try {
+      await expect(governance.approve(approver, version.id, { decision: "APPROVED" })).rejects.toThrow(/no recorded registrant/);
+      await expect(pool.query("INSERT INTO ml_model_approvals(tenant_id,model_version_id,decision,approver) VALUES($1,$2,'APPROVED',$3)", [manager.tenantId, version.id, approver.userId])).rejects.toThrow(/recorded registrant/);
+    } finally { await setRegistrant(manager.userId); }
     await governance.approve(approver, version.id, { decision: "APPROVED", note: "reviewed" });
     // A later rejection withdraws the approval, and relaxing the policy does not help a version registered under it.
     await governance.setPolicy(manager, registry.id, { minimumMetrics: [{ name: "mae", partition: "test", threshold: .25 }], requireApproval: true });

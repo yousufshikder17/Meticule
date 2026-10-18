@@ -296,8 +296,14 @@ export class MlExperimentService {
    * with nothing running, or whose time limit passed, does not wait for a reader. Never throws.
    */
   async sweepStudies(limit = 10): Promise<void> {
+    // Only studies the worker can move (cancelled, past their deadline, or with no open trial), in random order, so busy or
+    // permanently stuck older studies never starve newer ones.
     try {
-      for (const o of (await this.pool.query("SELECT tenant_id,id FROM ml_orchestrations WHERE kind='optuna' AND status='RUNNING' ORDER BY created_at LIMIT $1", [limit])).rows) await this.refresh(o.tenant_id, o.id).catch(() => undefined);
+      for (const o of (await this.pool.query(`SELECT o.tenant_id,o.id FROM ml_orchestrations o WHERE o.kind='optuna' AND o.status='RUNNING'
+          AND (o.cancel_requested_at IS NOT NULL OR o.created_at+make_interval(secs=>(o.config->'definition'->>'timeoutSeconds')::int)<=now()
+            OR NOT EXISTS(SELECT 1 FROM ml_orchestration_members m JOIN ml_training_jobs j ON j.tenant_id=m.tenant_id AND j.id=m.job_id
+              WHERE m.tenant_id=o.tenant_id AND m.orchestration_id=o.id AND j.status NOT IN ('COMPLETED','FAILED','CANCELLED')))
+        ORDER BY random() LIMIT $1`, [limit])).rows) await this.refresh(o.tenant_id, o.id).catch(() => undefined);
     } catch { /* retried on the next sweep */ }
   }
 

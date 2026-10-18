@@ -60,6 +60,8 @@ export class MlGovernanceService {
       if (!m) throw new NotFoundError("Model version not found");
       if (m.status !== "REGISTERED") throw new ConflictError("Only REGISTERED versions can be approved");
       if (m.registered_by === principal.userId) throw new ConflictError("The registrant cannot approve their own model version");
+      // Without a recorded registrant, no approval can be shown to be independent (the database refuses it as well).
+      if (!m.registered_by) throw new ConflictError("This version has no recorded registrant, so it cannot be approved; register it again from a new attempt");
       // Public tenant admins can create service identities; only a person may approve (the database refuses it as well).
       if ((await c.query("SELECT 1 FROM tenant_memberships WHERE tenant_id=$1 AND identity_id=$2 AND identity_type<>'user'", [principal.tenantId, principal.userId])).rowCount) throw new ConflictError("Service identities cannot approve model versions");
       const a = await c.query("INSERT INTO ml_model_approvals(tenant_id,model_version_id,decision,approver,note) VALUES($1,$2,$3,$4,$5) RETURNING *", [principal.tenantId, modelVersionId, input.decision, principal.userId, input.note]);

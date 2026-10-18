@@ -5,7 +5,8 @@ SET LOCAL search_path=public;
 ALTER TABLE ml_model_versions ADD COLUMN registered_by uuid;
 -- Public: versions registered before this migration recover their registrant from the append-only audit record that
 -- registration has always written (one ml.model_registered event per version, by the registering user), so separation of
--- duties applies to them too. Versions without such a record keep NULL.
+-- duties applies to them too. Versions without such a record keep NULL and can never be approved (independence cannot be
+-- shown); register them again from a new attempt.
 UPDATE ml_model_versions m SET registered_by=a.actor_id::uuid
 FROM (SELECT DISTINCT ON (tenant_id,details->>'modelVersionId') tenant_id,details->>'modelVersionId' AS model_version_id,actor_id
       FROM audit_events WHERE event_type='ml.model_registered' AND actor_type='user'
@@ -37,8 +38,8 @@ CREATE TABLE ml_model_approvals (
 CREATE INDEX ml_model_approvals_version_idx ON ml_model_approvals(tenant_id,model_version_id,created_at);
 CREATE FUNCTION ml_approval_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF EXISTS(SELECT 1 FROM ml_model_versions m WHERE m.tenant_id=NEW.tenant_id AND m.id=NEW.model_version_id AND (m.registered_by=NEW.approver OR m.status<>'REGISTERED')) THEN
-    RAISE EXCEPTION 'Approvals need a REGISTERED version and an approver other than its registrant' USING ERRCODE='check_violation';
+  IF EXISTS(SELECT 1 FROM ml_model_versions m WHERE m.tenant_id=NEW.tenant_id AND m.id=NEW.model_version_id AND (m.registered_by IS NULL OR m.registered_by=NEW.approver OR m.status<>'REGISTERED')) THEN
+    RAISE EXCEPTION 'Approvals need a REGISTERED version with a recorded registrant and an approver other than its registrant' USING ERRCODE='check_violation';
   END IF;
   IF EXISTS(SELECT 1 FROM tenant_memberships t WHERE t.tenant_id=NEW.tenant_id AND t.identity_id=NEW.approver AND t.identity_type<>'user') THEN
     RAISE EXCEPTION 'Approvals need a user identity, not a service identity' USING ERRCODE='check_violation';
