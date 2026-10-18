@@ -94,12 +94,13 @@ export class MlLineageService {
 
   /** What serves the given model versions. Later Phase 5 milestones add deployments, exports and reports here. */
   async downstream(db: Db, tenantId: string, modelVersionIds: string[]) {
-    if (!modelVersionIds.length) return { modelVersions: [], endpoints: [] };
-    const [models, endpoints] = await sequence([
+    if (!modelVersionIds.length) return { modelVersions: [], endpoints: [], onnxExports: [] };
+    const [models, endpoints, onnxExports] = await sequence([
       () => db.query("SELECT id,registry_entry_id,version,status,training_run_id,created_at FROM ml_model_versions WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
       () => db.query("SELECT id,name,model_version_id,status,created_at FROM ml_endpoints WHERE tenant_id=$1 AND model_version_id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
+      () => db.query("SELECT id,model_version_id,status,content->>'sha256' AS sha256,opsets,producer,created_at FROM ml_onnx_exports WHERE tenant_id=$1 AND model_version_id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
     ]);
-    return { modelVersions: models.rows, endpoints: endpoints.rows };
+    return { modelVersions: models.rows, endpoints: endpoints.rows, onnxExports: onnxExports.rows };
   }
 
   /** Re-reads the bytes behind each reference through the store's checksum check. Reports which reference failed, never why. */

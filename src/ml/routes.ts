@@ -16,6 +16,7 @@ import { MlTrackingService } from "./tracking.js";
 import { MlLineageService } from "./lineage.js";
 import { MlMlflowService } from "./mlflow.js";
 import { GovernanceRefusal, MlGovernanceService } from "./governance.js";
+import { MlOnnxService } from "./onnx.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export { FeatureDisabled } from "./persistence.js";
@@ -90,6 +91,11 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRout
     catch (error) { if (error instanceof GovernanceRefusal) return c.json({ error: "transition_refused", message: error.message, reasons: error.reasons }, 409); throw error; }
   });
   const governance = (database: pg.Pool) => new MlGovernanceService(database, new PostgresArtifactStore(database));
+  const onnx = (database: pg.Pool) => { if (!ml.onnx) throw new FeatureDisabled("onnx"); return new MlOnnxService(database, new PostgresArtifactStore(database), ml.onnx); };
+  // An unsupported or out-of-tolerance export is a recorded outcome (422), returned so the record commits with the request.
+  app.post("/ml/model-versions/:id/onnx-exports", async c => { const r = await onnx(c.get("database")).export(c.get("principal"), id(c.req.param("id")), c.req.raw.signal); return c.json(r, r.status === "VERIFIED" ? 201 : 422); });
+  app.get("/ml/model-versions/:id/onnx-exports", async c => c.json(await onnx(c.get("database")).list(c.get("principal"), id(c.req.param("id")))));
+  app.get("/ml/onnx-exports/:id/content", async c => c.body(new Uint8Array(await onnx(c.get("database")).content(c.get("principal"), id(c.req.param("id")))), 200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=model.onnx" }));
   app.put("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).setPolicy(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));
   app.get("/ml/registry/:id/policy", async c => c.json(await governance(c.get("database")).policies(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/model-versions/:id/approvals", async c => c.json(await governance(c.get("database")).approve(c.get("principal"), id(c.req.param("id")), await c.req.json()), 201));

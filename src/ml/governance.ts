@@ -13,6 +13,8 @@ const Name = z.string().trim().min(1).max(120);
 export const RegistryPolicy = z.strictObject({
   minimumMetrics: z.array(z.strictObject({ name: Name, partition: z.enum(["train", "validation", "test", "cv"]), threshold: z.number().finite() })).max(20).default([]),
   requireApproval: z.boolean().default(false),
+  // READY also needs a VERIFIED ONNX export of this version (converted, accepted by the runtime gate, within parity tolerance).
+  requireVerifiedOnnx: z.boolean().default(false),
 });
 export type RegistryPolicyType = z.infer<typeof RegistryPolicy>;
 export const ApprovalInput = z.strictObject({ decision: z.enum(["APPROVED", "REJECTED"]), note: z.string().max(1000).default("") });
@@ -87,6 +89,9 @@ export class MlGovernanceService {
       // The newest decision counts: a later rejection withdraws an earlier approval.
       const latest = (await db.query("SELECT decision,approver FROM ml_model_approvals WHERE tenant_id=$1 AND model_version_id=$2 ORDER BY created_at DESC,id DESC LIMIT 1", [tenantId, modelVersionId])).rows[0];
       if (!latest) failed.push({ code: "approval_required" }); else if (latest.decision !== "APPROVED") failed.push({ code: "approval_rejected" }); else passed.push("approval");
+    }
+    if (policy.requireVerifiedOnnx) {
+      if ((await db.query("SELECT 1 FROM ml_onnx_exports WHERE tenant_id=$1 AND model_version_id=$2 AND status='VERIFIED'", [tenantId, modelVersionId])).rowCount) passed.push("onnx_parity"); else failed.push({ code: "onnx_export_required" });
     }
     return { modelVersion: { id: m.id, status: m.status, registryEntryId: m.registry_entry_id }, policyVersion: p?.version ?? null, policy, passed, reasons: failed, eligibleForReady: m.status === "REGISTERED" && failed.length === 0 };
   }
