@@ -7,6 +7,7 @@ import type { Principal } from "../db/types.js";
 import { CreateAgentSchema, CreateRunSchema, PatchAgentSchema, ResumeRunSchema, UuidSchema, type AgentConfiguration } from "../domain/schemas.js";
 import { ConflictError, NotFoundError } from "../domain/errors.js";
 import { InvalidTransitionError } from "../domain/run-state.js";
+import { FeatureDisabled, type MlRouteConfiguration } from "../ml/routes.js";
 import { createToolRegistry } from "../tools/registry.js";
 import { ApprovalService } from "../approvals/approval-service.js";
 import { ApprovalDecisionSchema } from "../domain/schemas.js";
@@ -44,7 +45,7 @@ export interface ReadinessControl { isDraining(): boolean; checkMigrations(): Pr
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 
-export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval: RetrievalService | null = null, connectors: ConnectorService | null = null, providers: ProviderRegistry | null = null, structuredLogger: StructuredLogger = new NullLogger(), readiness: ReadinessControl | null = null, ml: ReturnType<typeof mlConfiguration> = mlConfiguration()): Hono<{ Variables: Variables }> {
+export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval: RetrievalService | null = null, connectors: ConnectorService | null = null, providers: ProviderRegistry | null = null, structuredLogger: StructuredLogger = new NullLogger(), readiness: ReadinessControl | null = null, ml: MlRouteConfiguration = mlConfiguration()): Hono<{ Variables: Variables }> {
   const app = new Hono<{ Variables: Variables }>();
   const tools = createToolRegistry(pool, retrieval, connectors);
   const requireRetrieval = (): RetrievalService => { if (!retrieval) throw new EmbeddingConfigurationError("Retrieval is disabled because no real embedding provider is configured"); return retrieval; };
@@ -71,6 +72,7 @@ export function createApp(pool: pg.Pool, authenticator: Authenticator, retrieval
     if (error instanceof McpSchemaError) return c.json({ error: "invalid_mcp_schema", message: error.message }, 422);
     if (error instanceof ConnectorCallError) return c.json({ error: error.code, message: error.message }, error.code === "rate_limited" ? 429 : 400);
     if (error instanceof McpTransportError) return c.json({ error: "mcp_transport_error", code: error.code, message: error.message }, 502);
+    if (error instanceof FeatureDisabled) return c.json({ error: "ml_feature_not_configured", message: error.message }, 503);
     if (error instanceof ConflictError || error instanceof InvalidTransitionError) return c.json({ error: "conflict", message: error.message }, 409);
     structuredLogger.log("error", "http.request_failed", { correlationId: c.get("correlationId"), method: c.req.method, path: c.req.path, error });
     return c.json({ error: "internal_error" }, 500);

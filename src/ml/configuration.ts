@@ -36,6 +36,12 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_AUDIO_PYTHON: z.string().min(1).default(python),
     ML_FORECASTING_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_FORECASTING_PYTHON: z.string().min(1).default(python),
+    // MLOps features share one interpreter (ml/requirements-mlops.txt); each is off by default and gated by ML_ENABLED.
+    ML_MLOPS_PYTHON: z.string().min(1).default(python),
+    ML_MLFLOW_ENABLED: z.enum(["true", "false"]).default("false"),
+    ML_MLFLOW_TRACKING_URI: z.string().default(""),
+    ML_MLFLOW_TRACKING_TOKEN: z.string().default(""),
+    ML_MLFLOW_EXPERIMENT_PREFIX: z.string().regex(/^[A-Za-z0-9_.-]{1,40}$/).default("meticule"),
   }).parse(env);
   const backends = new Map<string, MlBackend>();
   if (config.ML_ENABLED === "true") {
@@ -53,7 +59,12 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     if (config.ML_AUDIO_ENABLED === "true") { const audio = new AudioBackend(config.ML_AUDIO_PYTHON, config.ML_TIMEOUT_MS); backends.set(audio.id, audio); }
     if (config.ML_FORECASTING_ENABLED === "true") { const forecasting = new ForecastingBackend(config.ML_FORECASTING_PYTHON, config.ML_TIMEOUT_MS); backends.set(forecasting.id, forecasting); }
   }
-  return { enabled: config.ML_ENABLED === "true", backends };
+  const on = (flag: string) => config.ML_ENABLED === "true" && flag === "true";
+  // The tracking server is operator configuration only; requests never name a URI, so export cannot be pointed elsewhere.
+  if (on(config.ML_MLFLOW_ENABLED) && !/^https?:\/\/[^\s]+$/.test(config.ML_MLFLOW_TRACKING_URI)) throw new Error("ML_MLFLOW_TRACKING_URI must be an http(s) URL of an MLflow tracking server");
+  const runner = { python: config.ML_MLOPS_PYTHON, timeoutMs: config.ML_TIMEOUT_MS };
+  return { enabled: config.ML_ENABLED === "true", backends,
+    mlflow: on(config.ML_MLFLOW_ENABLED) ? { ...runner, trackingUri: config.ML_MLFLOW_TRACKING_URI, token: config.ML_MLFLOW_TRACKING_TOKEN, prefix: config.ML_MLFLOW_EXPERIMENT_PREFIX } : null };
 }
 
 function isDirectory(path: string): boolean {

@@ -7,15 +7,22 @@ import { ConflictError, NotFoundError } from "../domain/errors.js";
 import { RunRepository } from "../db/repositories.js";
 import { PostgresArtifactStore } from "./artifact-store.js";
 import { mlConfiguration } from "./configuration.js";
+import { MlBackendFailure } from "./contract.js";
 import { MlTrainingService, QueueTraining, authorizeMl } from "./persistence.js";
 import { MlModelService, ModelTransitionInput } from "./model-service.js";
 import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerExperimentRoutes } from "./experiment-routes.js";
 import { MlTrackingService } from "./tracking.js";
 import { MlLineageService } from "./lineage.js";
+import { MlMlflowService } from "./mlflow.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
-export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlConfiguration()): void {
+/** An optional Phase 5 feature that this deployment has not enabled. Mapped to 503 like ML itself being disabled. */
+export class FeatureDisabled extends Error { readonly status = 503; constructor(feature: string) { super(`ML feature not configured: ${feature}`); } }
+type Configuration = ReturnType<typeof mlConfiguration>;
+// Phase 5 features are optional: a caller that omits one gets 503 for its routes, exactly as when it is disabled.
+export type MlRouteConfiguration = Pick<Configuration, "enabled" | "backends"> & Partial<Omit<Configuration, "enabled" | "backends">>;
+export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml: MlRouteConfiguration = mlConfiguration()): void {
   const id = (value: string) => z.uuid().parse(value);
   app.use("/ml/*", bodyLimit({ maxSize: 8_000_000, onError: c => c.json({ error: "payload_too_large" }, 413) }));
   app.use("/ml/*", async (c, next) => { if (!ml.enabled) return c.json({ error: "ml_not_configured" }, 503); return next(); });
@@ -44,6 +51,14 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlCon
   app.get("/ml/training-runs/:id/reproducibility/:candidate", async c => c.json(await tracking(c.get("database")).reproducibility(c.get("principal"), id(c.req.param("id")), id(c.req.param("candidate")))));
   app.get("/ml/lineage/model-versions/:id", async c => c.json(await lineage(c.get("database")).modelVersion(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
   app.get("/ml/lineage/training-runs/:id", async c => c.json(await lineage(c.get("database")).trainingRun(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
+  const mlflow = (database: pg.Pool) => { if (!ml.mlflow) throw new FeatureDisabled("mlflow"); return new MlMlflowService(database, new PostgresArtifactStore(database), ml.mlflow); };
+  app.post("/ml/training-runs/:id/mlflow-export", async c => { const r = await mlflow(c.get("database")).export(c.get("principal"), id(c.req.param("id")), c.req.raw.signal); return c.json(r, r.status === "FAILED" ? 502 : 200); });
+  app.get("/ml/training-runs/:id/mlflow-exports", async c => c.json(await mlflow(c.get("database")).exports(c.get("principal"), id(c.req.param("id")))));
+  app.post("/ml/mlflow/imports", async c => {
+    try { return c.json(await mlflow(c.get("database")).import(c.get("principal"), await c.req.json(), c.req.raw.signal), 201); }
+    catch (error) { if (error instanceof MlBackendFailure) return c.json({ error: "mlflow_import_failed", category: error.category }, 502); throw error; }
+  });
+  app.get("/ml/experiments/:id/external-runs", async c => c.json(await mlflow(c.get("database")).externalRuns(c.get("principal"), id(c.req.param("id")))));
   app.get("/ml/lineage/dataset-versions/:id", async c => c.json(await lineage(c.get("database")).datasetVersion(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/training-jobs", async c => {
     const p = c.get("principal"); authorizeMl(p, true); const input = QueueTraining.parse(await c.req.json());

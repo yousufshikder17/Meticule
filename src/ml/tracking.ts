@@ -5,6 +5,7 @@ import { canonicalJson, canonicalJsonHash } from "../domain/canonical-json.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, MlBackend } from "./backend.js";
 import { TrainingSnapshot, cohortKey, type MetricValue } from "./domain.js";
+import { sequence } from "./lineage.js";
 import { audit, ExperimentTags, MlTrainingService, authorizeMl, transaction } from "./persistence.js";
 
 const Name = z.string().trim().min(1).max(120);
@@ -48,9 +49,9 @@ export class MlTrackingService {
     authorizeMl(principal);
     const e = await this.pool.query(`SELECT e.*,${STATUS_SQL} AS status,to_jsonb(s) AS summary FROM ml_experiments e ${SUMMARY_SQL} WHERE e.tenant_id=$1 AND e.id=$2`, [principal.tenantId, id]);
     if (!e.rowCount) throw new NotFoundError("Experiment not found");
-    const [jobs, children] = await Promise.all([
-      this.pool.query("SELECT * FROM ml_training_jobs WHERE tenant_id=$1 AND experiment_id=$2 ORDER BY created_at DESC LIMIT 100", [principal.tenantId, id]),
-      this.pool.query("SELECT id,name,project,created_at FROM ml_experiments WHERE tenant_id=$1 AND parent_experiment_id=$2 ORDER BY created_at DESC,id LIMIT 100", [principal.tenantId, id]),
+    const [jobs, children] = await sequence([
+      () => this.pool.query("SELECT * FROM ml_training_jobs WHERE tenant_id=$1 AND experiment_id=$2 ORDER BY created_at DESC LIMIT 100", [principal.tenantId, id]),
+      () => this.pool.query("SELECT id,name,project,created_at FROM ml_experiments WHERE tenant_id=$1 AND parent_experiment_id=$2 ORDER BY created_at DESC,id LIMIT 100", [principal.tenantId, id]),
     ]);
     return { experiment: e.rows[0], jobs: jobs.rows, children: children.rows };
   }
@@ -141,7 +142,7 @@ export class MlTrackingService {
     const envKeys = [...new Set([...Object.keys(a.environment), ...Object.keys(b.environment)])].sort();
     const environmentDifferences = envKeys.filter(k => a.environment[k] !== b.environment[k]).map(k => ({ key: k, original: a.environment[k] ?? null, candidate: b.environment[k] ?? null }));
     const load = async (id: string) => (await this.pool.query("SELECT name,partition,value,direction,fold FROM ml_metrics WHERE tenant_id=$1 AND training_run_id=$2", [principal.tenantId, id])).rows as MetricValue[];
-    const [ma, mb] = await Promise.all([load(originalId), load(candidateId)]);
+    const ma = await load(originalId), mb = await load(candidateId);
     const metrics = ma.map(m => { const o = mb.find(x => x.name === m.name && x.partition === m.partition && (x.fold ?? null) === (m.fold ?? null)); return { name: m.name, partition: m.partition, fold: m.fold ?? null, original: m.value, candidate: o?.value ?? null, absoluteDelta: o ? Math.abs(o.value - m.value) : null }; });
     const missing = metrics.some(m => m.candidate === null) || mb.length !== ma.length;
     const exact = !missing && metrics.every(m => m.absoluteDelta === 0);

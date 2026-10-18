@@ -16,6 +16,8 @@ export interface RunnerCall {
   signal: AbortSignal;
   /** Contract the request speaks; v1 unless the caller selects one (RunnerBackend uses contractFor). */
   contract?: MlBackendContract;
+  /** Extra variables for this runner only (e.g. an MLflow token). Never logged and never inherited by other runners. */
+  environment?: Record<string, string>;
 }
 
 /**
@@ -23,12 +25,12 @@ export interface RunnerCall {
  * The child is killed on timeout or abort (lease loss, cancellation); it never outlives the call.
  * Every request carries the contract version, and every response must echo exactly that version (A2).
  */
-export function callRunner({ label, python, script, timeoutMs, request, signal, contract = ML_BACKEND_CONTRACT }: RunnerCall): Promise<unknown> {
+export function callRunner({ label, python, script, timeoutMs, request, signal, contract = ML_BACKEND_CONTRACT, environment = {} }: RunnerCall): Promise<unknown> {
   return new Promise((resolveCall, reject) => {
     const envelope = { ...request, contract };
     const command = String(request.command);
     let timedOut = false; let oversize = false;
-    const child = spawn(python, [script], { windowsHide: true, shell: false, signal, env: runnerEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(python, [script], { windowsHide: true, shell: false, signal, env: { ...runnerEnvironment(), ...environment }, stdio: ["pipe", "pipe", "pipe"] });
     let size = 0; const chunks: Buffer[] = []; let errors = "";
     const timeout = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => { size += chunk.length; if (size > MAX_OUTPUT_BYTES) { oversize = true; child.kill(); } else chunks.push(chunk); });

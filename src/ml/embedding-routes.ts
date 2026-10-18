@@ -10,7 +10,7 @@ import { authorizeMl } from "./persistence.js";
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 
 /** Embedding indexes (build, search) and pairwise similarity. Generation stays in the backends behind the endpoints. */
-export function registerEmbeddingRoutes(app: Hono<{ Variables: Variables }>, ml: ReturnType<typeof mlConfiguration>): void {
+export function registerEmbeddingRoutes(app: Hono<{ Variables: Variables }>, ml: Pick<ReturnType<typeof mlConfiguration>, "backends">): void {
   const id = (value: string) => z.uuid().parse(value);
   const service = (c: { get(key: "database"): pg.Pool }) => new MlEmbeddingService(c.get("database"), new PostgresArtifactStore(c.get("database")), ml.backends);
   app.post("/ml/embedding-indexes", async c => c.json(await service(c).create(c.get("principal"), await c.req.json()), 201));

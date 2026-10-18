@@ -8,6 +8,9 @@ import { authorizeMl } from "./persistence.js";
 /** A lineage defect: a reference that is missing, points elsewhere, or whose bytes fail verification. */
 export interface LineageIssue { code: string; subject: string; id: string }
 type Db = pg.Pool | pg.PoolClient;
+export async function sequence<T extends (() => Promise<unknown>)[]>(queries: [...T]): Promise<{ [K in keyof T]: Awaited<ReturnType<T[K]>> }> {
+  const out: unknown[] = []; for (const q of queries) out.push(await q()); return out as { [K in keyof T]: Awaited<ReturnType<T[K]>> };
+}
 
 /**
  * Provenance is the existing relational record (foreign keys between datasets, pipelines, jobs, attempts, artifacts,
@@ -59,15 +62,16 @@ export class MlLineageService {
     if (!t) throw new NotFoundError("Training run not found");
     const j = (await db.query("SELECT * FROM ml_training_jobs WHERE tenant_id=$1 AND id=$2", [tenantId, t.job_id])).rows[0];
     const snapshot = TrainingSnapshot.parse(j.snapshot);
-    const [experiments, orchestrations, attempts, checkpoints, dataset, pipeline] = await Promise.all([
-      db.query(`WITH RECURSIVE chain AS (SELECT e.*,0 AS depth FROM ml_experiments e WHERE e.tenant_id=$1 AND e.id=$2
+    // Sequential on purpose: `db` may be one client (a transaction or the API's tenant session), which runs one query at a time.
+    const [experiments, orchestrations, attempts, checkpoints, dataset, pipeline] = await sequence([
+      () => db.query(`WITH RECURSIVE chain AS (SELECT e.*,0 AS depth FROM ml_experiments e WHERE e.tenant_id=$1 AND e.id=$2
         UNION ALL SELECT p.*,c.depth+1 FROM ml_experiments p JOIN chain c ON p.tenant_id=c.tenant_id AND p.id=c.parent_experiment_id WHERE c.depth<20)
         SELECT id,name,project,tags,parent_experiment_id FROM chain ORDER BY depth`, [tenantId, j.experiment_id]),
-      db.query("SELECT o.id,o.kind,o.name,o.parent_id,m.label FROM ml_orchestration_members m JOIN ml_orchestrations o ON o.tenant_id=m.tenant_id AND o.id=m.orchestration_id WHERE m.tenant_id=$1 AND m.job_id=$2", [tenantId, j.id]),
-      db.query("SELECT id,attempt,status,started_at,ended_at,resumed_from_epoch,failure->>'category' AS failure_category FROM ml_training_runs WHERE tenant_id=$1 AND job_id=$2 ORDER BY attempt", [tenantId, j.id]),
-      db.query("SELECT c.id,c.training_run_id,c.epoch,c.format,c.content->>'sha256' AS sha256,t.attempt FROM ml_training_checkpoints c JOIN ml_training_runs t ON t.tenant_id=c.tenant_id AND t.id=c.training_run_id WHERE c.tenant_id=$1 AND t.job_id=$2 ORDER BY c.epoch", [tenantId, j.id]),
-      db.query("SELECT v.id,v.dataset_id,v.version,v.schema_id,v.document,d.name FROM ml_dataset_versions v JOIN ml_datasets d ON d.tenant_id=v.tenant_id AND d.id=v.dataset_id WHERE v.tenant_id=$1 AND v.id=$2", [tenantId, j.dataset_version_id]),
-      db.query("SELECT id,logical_id,version,document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [tenantId, j.pipeline_id]),
+      () => db.query("SELECT o.id,o.kind,o.name,o.parent_id,m.label FROM ml_orchestration_members m JOIN ml_orchestrations o ON o.tenant_id=m.tenant_id AND o.id=m.orchestration_id WHERE m.tenant_id=$1 AND m.job_id=$2", [tenantId, j.id]),
+      () => db.query("SELECT id,attempt,status,started_at,ended_at,resumed_from_epoch,failure->>'category' AS failure_category FROM ml_training_runs WHERE tenant_id=$1 AND job_id=$2 ORDER BY attempt", [tenantId, j.id]),
+      () => db.query("SELECT c.id,c.training_run_id,c.epoch,c.format,c.content->>'sha256' AS sha256,t.attempt FROM ml_training_checkpoints c JOIN ml_training_runs t ON t.tenant_id=c.tenant_id AND t.id=c.training_run_id WHERE c.tenant_id=$1 AND t.job_id=$2 ORDER BY c.epoch", [tenantId, j.id]),
+      () => db.query("SELECT v.id,v.dataset_id,v.version,v.schema_id,v.document,d.name FROM ml_dataset_versions v JOIN ml_datasets d ON d.tenant_id=v.tenant_id AND d.id=v.dataset_id WHERE v.tenant_id=$1 AND v.id=$2", [tenantId, j.dataset_version_id]),
+      () => db.query("SELECT id,logical_id,version,document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [tenantId, j.pipeline_id]),
     ]);
     const d = dataset.rows[0], p = pipeline.rows[0];
     if (snapshot.datasetVersionId !== j.dataset_version_id || snapshot.dataset.id !== j.dataset_version_id) issues.push({ code: "snapshot_dataset_mismatch", subject: "training_job", id: j.id });
@@ -90,9 +94,9 @@ export class MlLineageService {
   /** What serves the given model versions. Later Phase 5 milestones add deployments, exports and reports here. */
   async downstream(db: Db, tenantId: string, modelVersionIds: string[]) {
     if (!modelVersionIds.length) return { modelVersions: [], endpoints: [] };
-    const [models, endpoints] = await Promise.all([
-      db.query("SELECT id,registry_entry_id,version,status,training_run_id,created_at FROM ml_model_versions WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
-      db.query("SELECT id,name,model_version_id,status,created_at FROM ml_endpoints WHERE tenant_id=$1 AND model_version_id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
+    const [models, endpoints] = await sequence([
+      () => db.query("SELECT id,registry_entry_id,version,status,training_run_id,created_at FROM ml_model_versions WHERE tenant_id=$1 AND id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
+      () => db.query("SELECT id,name,model_version_id,status,created_at FROM ml_endpoints WHERE tenant_id=$1 AND model_version_id=ANY($2::uuid[]) ORDER BY created_at", [tenantId, modelVersionIds]),
     ]);
     return { modelVersions: models.rows, endpoints: endpoints.rows };
   }

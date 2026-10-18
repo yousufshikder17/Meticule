@@ -65,7 +65,7 @@ export function testApp(store: PostgresArtifactStore, backends: ReadonlyMap<stri
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("database", pool); await next(); });
   // Mirrors the status mapping of src/api/app.ts for the error classes ML routes throw.
   app.onError((error, c) => c.json({ error: error.message, reasons: (error as { reasons?: unknown }).reasons }, ((error as { status?: number }).status ?? (error.name === "ZodError" ? 400 : 500)) as 400));
-  registerMlRoutes(app, { enabled: true, artifacts: store, backends, ...extra } as never);
+  registerMlRoutes(app, { enabled: true, backends, ...extra } as never);
   return app;
 }
 export const json = (body: unknown, method = "POST") => ({ method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
