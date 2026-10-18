@@ -11,6 +11,8 @@ import { MlTrainingService, QueueTraining, authorizeMl } from "./persistence.js"
 import { MlModelService, ModelTransitionInput } from "./model-service.js";
 import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerExperimentRoutes } from "./experiment-routes.js";
+import { MlTrackingService } from "./tracking.js";
+import { MlLineageService } from "./lineage.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
 export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlConfiguration()): void {
@@ -18,7 +20,7 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlCon
   app.use("/ml/*", bodyLimit({ maxSize: 8_000_000, onError: c => c.json({ error: "payload_too_large" }, 413) }));
   app.use("/ml/*", async (c, next) => { if (!ml.enabled) return c.json({ error: "ml_not_configured" }, 503); return next(); });
   const tables = new Map([
-    ["datasets", "ml_datasets"], ["pipelines", "ml_feature_pipelines"], ["experiments", "ml_experiments"],
+    ["datasets", "ml_datasets"], ["pipelines", "ml_feature_pipelines"],
     ["registry", "ml_registry_entries"], ["model-versions", "ml_model_versions"], ["endpoints", "ml_endpoints"],
   ]);
   for (const [path, table] of tables) app.get(`/ml/${path}`, async c => {
@@ -30,12 +32,19 @@ export function registerMlRoutes(app: Hono<{ Variables: Variables }>, ml = mlCon
   app.get("/ml/datasets/:id/versions", async c => { const p = c.get("principal"); authorizeMl(p); return c.json((await c.get("database").query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND dataset_id=$2 ORDER BY version DESC LIMIT 100", [p.tenantId, id(c.req.param("id"))])).rows.map(r => r.document)); });
   app.post("/ml/pipelines", async c => c.json(await new MlTrainingService(c.get("database"), new PostgresArtifactStore(c.get("database"))).pipeline(c.get("principal"), await c.req.json()), 201));
   app.post("/ml/pipelines/:id/versions", async c => c.json(await new MlTrainingService(c.get("database"), new PostgresArtifactStore(c.get("database"))).pipeline(c.get("principal"), await c.req.json(), id(c.req.param("id"))), 201));
-  app.post("/ml/experiments", async c => c.json(await new MlTrainingService(c.get("database"), new PostgresArtifactStore(c.get("database"))).experiment(c.get("principal"), z.object({ name: z.string() }).parse(await c.req.json()).name), 201));
-  app.get("/ml/experiments/:id", async c => {
-    const p = c.get("principal"); authorizeMl(p); const database = c.get("database"), experimentId = id(c.req.param("id"));
-    const e = await database.query("SELECT * FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [p.tenantId, experimentId]); if (!e.rowCount) throw new NotFoundError("Experiment not found");
-    return c.json({ experiment: e.rows[0], jobs: (await database.query("SELECT * FROM ml_training_jobs WHERE tenant_id=$1 AND experiment_id=$2 ORDER BY created_at DESC LIMIT 100", [p.tenantId, experimentId])).rows });
-  });
+  const tracking = (database: pg.Pool) => new MlTrackingService(database, new PostgresArtifactStore(database), ml.backends);
+  const lineage = (database: pg.Pool) => new MlLineageService(database, new PostgresArtifactStore(database));
+  app.get("/ml/experiments", async c => c.json(await tracking(c.get("database")).list(c.get("principal"), { ...c.req.query(), tag: c.req.queries("tag") ?? [] })));
+  app.post("/ml/experiments", async c => c.json(await new MlTrainingService(c.get("database"), new PostgresArtifactStore(c.get("database"))).experiment(c.get("principal"), await c.req.json()), 201));
+  app.get("/ml/experiments/:id", async c => c.json(await tracking(c.get("database")).get(c.get("principal"), id(c.req.param("id")))));
+  app.patch("/ml/experiments/:id", async c => c.json(await tracking(c.get("database")).update(c.get("principal"), id(c.req.param("id")), await c.req.json())));
+  app.get("/ml/experiments/:id/runs", async c => c.json(await tracking(c.get("database")).runs(c.get("principal"), id(c.req.param("id")))));
+  app.post("/ml/training-runs/compare", async c => c.json(await tracking(c.get("database")).compare(c.get("principal"), await c.req.json())));
+  app.post("/ml/training-jobs/:id/reproduce", async c => c.json(await tracking(c.get("database")).reproduce(c.get("principal"), id(c.req.param("id"))), 202));
+  app.get("/ml/training-runs/:id/reproducibility/:candidate", async c => c.json(await tracking(c.get("database")).reproducibility(c.get("principal"), id(c.req.param("id")), id(c.req.param("candidate")))));
+  app.get("/ml/lineage/model-versions/:id", async c => c.json(await lineage(c.get("database")).modelVersion(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
+  app.get("/ml/lineage/training-runs/:id", async c => c.json(await lineage(c.get("database")).trainingRun(c.get("principal"), id(c.req.param("id")), c.req.query("verify") === "true")));
+  app.get("/ml/lineage/dataset-versions/:id", async c => c.json(await lineage(c.get("database")).datasetVersion(c.get("principal"), id(c.req.param("id")))));
   app.post("/ml/training-jobs", async c => {
     const p = c.get("principal"); authorizeMl(p, true); const input = QueueTraining.parse(await c.req.json());
     if (!ml.backends.has(input.spec.backend)) throw new ConflictError("Requested ML backend is not configured");

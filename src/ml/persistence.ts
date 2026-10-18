@@ -36,6 +36,9 @@ const Name = z.string().trim().min(1).max(120);
 export const IngestDataset = z.object({ name: Name, schema: DatasetSchema, rows: z.unknown() });
 export const CreatePipeline = z.object({ name: Name, definition: PipelineDefinition });
 export const QueueTraining = z.object({ experimentId: z.uuid(), spec: TrainingSpec });
+// Tags are flat string pairs so they can be filtered with one containment query.
+export const ExperimentTags = z.record(z.string().trim().min(1).max(60), z.string().max(200)).refine(t => Object.keys(t).length <= 20, "At most 20 tags").default({});
+export const ExperimentInput = z.strictObject({ name: Name, description: z.string().max(2000).default(""), project: Name.optional(), tags: ExperimentTags, parentExperimentId: z.uuid().optional() });
 
 export class MlTrainingService {
   constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore) {}
@@ -76,10 +79,12 @@ export class MlTrainingService {
     await c.query("INSERT INTO ml_feature_pipelines(id,tenant_id,logical_id,version,document) VALUES($1,$2,$3,$4,$5)", [id, principal.tenantId, doc.logicalId, version, JSON.stringify(doc)]);
     await audit(c, principal.tenantId, principal.userId, "ml.pipeline_version_created", { pipelineId: id }); return doc;
   }
-  async experiment(principal: Principal, name: string) {
-    authorizeMl(principal, true); Name.parse(name);
+  /** A bare name keeps the Phase 1 call shape; the object form adds the Phase 5 tracking metadata. */
+  async experiment(principal: Principal, raw: string | unknown) {
+    authorizeMl(principal, true); const input = ExperimentInput.parse(typeof raw === "string" ? { name: raw } : raw);
     return transaction(this.pool, async c => {
-      const r = await c.query("INSERT INTO ml_experiments(tenant_id,name,created_by) VALUES($1,$2,$3) RETURNING *", [principal.tenantId, name, principal.userId]);
+      if (input.parentExperimentId && !(await c.query("SELECT 1 FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.parentExperimentId])).rowCount) throw new NotFoundError("Parent experiment not found");
+      const r = await c.query("INSERT INTO ml_experiments(tenant_id,name,created_by,description,project,tags,parent_experiment_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *", [principal.tenantId, input.name, principal.userId, input.description, input.project ?? null, JSON.stringify(input.tags), input.parentExperimentId ?? null]);
       await audit(c, principal.tenantId, principal.userId, "ml.experiment_created", { id: r.rows[0].id }); return r.rows[0];
     });
   }
@@ -88,7 +93,7 @@ export class MlTrainingService {
     return transaction(this.pool, c => this.queueIn(c, principal, input));
   }
   /** Transaction-scoped form used by benchmark/search/AutoML to create many ordinary jobs atomically. */
-  async queueIn(c: pg.PoolClient, principal: Principal, input: z.infer<typeof QueueTraining>) {
+  async queueIn(c: pg.PoolClient, principal: Principal, input: z.infer<typeof QueueTraining>, reproducesJobId: string | null = null) {
     const e = await c.query("SELECT id FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.experimentId]);
     const d = await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.spec.datasetVersionId]);
     const p = await c.query("SELECT document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [principal.tenantId, input.spec.featurePipelineId]);
@@ -96,7 +101,7 @@ export class MlTrainingService {
     const snapshot = TrainingSnapshot.parse({ ...input.spec, dataset: d.rows[0].document, pipeline: p.rows[0].document }); validateSnapshot(snapshot);
     const runId = randomUUID();
     await c.query("INSERT INTO runs(id,tenant_id,kind,created_by,goal,root_run_id,token_budget_limit,cost_budget_limit_microusd) VALUES($1,$2,'ml',$3,'ML training',$1,0,0)", [runId, principal.tenantId, principal.userId]);
-    const job = await c.query("INSERT INTO ml_training_jobs(tenant_id,run_id,experiment_id,dataset_version_id,pipeline_id,snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [principal.tenantId, runId, input.experimentId, snapshot.datasetVersionId, snapshot.featurePipelineId, JSON.stringify(snapshot)]);
+    const job = await c.query("INSERT INTO ml_training_jobs(tenant_id,run_id,experiment_id,dataset_version_id,pipeline_id,snapshot,reproduces_job_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *", [principal.tenantId, runId, input.experimentId, snapshot.datasetVersionId, snapshot.featurePipelineId, JSON.stringify(snapshot), reproducesJobId]);
     await audit(c, principal.tenantId, principal.userId, "ml.training_queued", { jobId: job.rows[0].id }, runId); return job.rows[0];
   }
   async getJob(principal: Principal, id: string) {

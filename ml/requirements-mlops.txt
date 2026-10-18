@@ -1,0 +1,11 @@
+# Phase 5 MLOps runners (ONNX export/runtime, Optuna, Matplotlib reports, MLflow export). One interpreter
+# (ML_MLOPS_PYTHON) serves all four; each feature has its own enable flag. The scikit-learn pins come from
+# requirements.txt and must match the training interpreter, because ONNX export unpickles scikit-learn artifacts.
+# Only mlflow-skinny (the tracking client) is needed at runtime; the tests also install mlflow==3.16.1 to run a local server.
+-r requirements.txt
+onnx==1.23.0
+onnxruntime==1.30.0
+skl2onnx==1.20.0
+optuna==5.0.0
+matplotlib==3.11.2
+mlflow-skinny==3.16.1
