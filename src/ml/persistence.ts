@@ -10,6 +10,8 @@ import type { ArtifactStore, Performance, PreparedData, TrainedModel } from "./b
 import type { EpochSummary } from "./training-policy.js";
 import { DatasetSchema, DatasetVersion, FeaturePipeline, Metric, PipelineDefinition, TrainingSnapshot, TrainingSpec, assertMetricShape, assertTrainingTransition, datasetValidator, validateRows, validateSnapshot, type ArtifactReference, type MetricValue, type Snapshot, type TrainingState } from "./domain.js";
 
+/** An optional Phase 5 feature that this deployment has not enabled. Mapped to 503 like ML itself being disabled. */
+export class FeatureDisabled extends Error { readonly status = 503; constructor(feature: string) { super(`ML feature not configured: ${feature}`); } }
 export function authorizeMl(p: Principal, write = false): void {
   if (write && !p.roles.includes("tenant_admin")) throw new AuthorizationError("Required role: tenant_admin");
 }

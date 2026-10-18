@@ -34,7 +34,7 @@ const operations = new OperationalService(pool, providers);
 const roles = config.WORKER_ROLES.split(",").map((role) => role.trim()).filter(Boolean);
 const worker = new LifecycleWorker(pool, { workerId: config.WORKER_ID, leaseSeconds: config.LEASE_SECONDS }, { execute: (runId, workerId) => loop.execute(runId, workerId, roles) }, logger);
 const ml = mlConfiguration();
-const mlWorker = ml.enabled ? new LifecycleWorker(pool, { workerId: `${config.WORKER_ID}:ml`, leaseSeconds: config.LEASE_SECONDS, kind: "ml" }, new TrainingProcessor(pool, new PostgresArtifactStore(pool), ml.backends), logger) : null;
+const mlWorker = ml.enabled ? new LifecycleWorker(pool, { workerId: `${config.WORKER_ID}:ml`, leaseSeconds: config.LEASE_SECONDS, kind: "ml" }, new TrainingProcessor(pool, new PostgresArtifactStore(pool), ml.backends, { optuna: ml.optuna }), logger) : null;
 let stopping = false;
 const requestStop = (): void => { stopping = true; void operations.heartbeat(config.WORKER_ID, "worker", { roles, pid: process.pid }, true).catch((error) => logger.log("error", "worker.drain_signal_failed", { workerId: config.WORKER_ID, error })); };
 process.once("SIGINT", requestStop);

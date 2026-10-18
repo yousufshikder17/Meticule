@@ -8,7 +8,7 @@ import { RunRepository } from "../db/repositories.js";
 import { PostgresArtifactStore } from "./artifact-store.js";
 import { mlConfiguration } from "./configuration.js";
 import { MlBackendFailure } from "./contract.js";
-import { MlTrainingService, QueueTraining, authorizeMl } from "./persistence.js";
+import { FeatureDisabled, MlTrainingService, QueueTraining, authorizeMl } from "./persistence.js";
 import { MlModelService, ModelTransitionInput } from "./model-service.js";
 import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerExperimentRoutes } from "./experiment-routes.js";
@@ -17,8 +17,7 @@ import { MlLineageService } from "./lineage.js";
 import { MlMlflowService } from "./mlflow.js";
 
 type Variables = { principal: Principal; database: pg.Pool; correlationId: string };
-/** An optional Phase 5 feature that this deployment has not enabled. Mapped to 503 like ML itself being disabled. */
-export class FeatureDisabled extends Error { readonly status = 503; constructor(feature: string) { super(`ML feature not configured: ${feature}`); } }
+export { FeatureDisabled } from "./persistence.js";
 type Configuration = ReturnType<typeof mlConfiguration>;
 // Phase 5 features are optional: a caller that omits one gets 503 for its routes, exactly as when it is disabled.
 export type MlRouteConfiguration = Pick<Configuration, "enabled" | "backends"> & Partial<Omit<Configuration, "enabled" | "backends">>;

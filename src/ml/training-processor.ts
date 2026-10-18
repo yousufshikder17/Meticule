@@ -3,7 +3,7 @@ import type { ArtifactStore, MlBackend, PreparedData, TrainedModel } from "./bac
 import { ConflictError } from "../domain/errors.js";
 import { failureCategory, MlBackendFailure } from "./contract.js";
 import { validateRows, type ArtifactReference, type Row, type Snapshot } from "./domain.js";
-import { MlExperimentService } from "./experiments.js";
+import { MlExperimentService, type MlExperimentOptions } from "./experiments.js";
 import { MlTrainingService } from "./persistence.js";
 import { EarlyStopper, effectivePolicy, isIterative, requestedEpochs } from "./training-policy.js";
 import { getModel } from "./model-catalog.js";
@@ -44,7 +44,7 @@ function assertSameSplit(previous: Record<string, number[]> | null, prepared: Pr
 }
 
 export class TrainingProcessor {
-  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>) {}
+  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>, private readonly options: MlExperimentOptions = {}) {}
   async execute(runId: string, workerId: string): Promise<void> {
     const service = new MlTrainingService(this.pool, this.artifacts);
     const controller = new AbortController(); const started = Date.now();
@@ -94,7 +94,8 @@ export class TrainingProcessor {
     } finally {
       clearInterval(guard); controller.abort();
       // A terminal job may complete a benchmark/search/AutoML experiment; failure here must never affect the job.
-      await new MlExperimentService(this.pool, this.artifacts, this.backends).onJobTerminal(runId);
+      // An Optuna study asks for its next trial here, so the worker needs the Optuna runner configuration too.
+      await new MlExperimentService(this.pool, this.artifacts, this.backends, this.options).onJobTerminal(runId);
     }
   }
 

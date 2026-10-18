@@ -72,6 +72,7 @@ const RUNNER_CODES: Record<string, MlFailureCategory> = {
   pretrained_label_mismatch: "invalid_request",
   // Phase 5 MLOps runners (MLflow, ONNX, Optuna, reports).
   external_service_unavailable: "backend_unavailable",
+  invalid_search_space: "invalid_request",
 };
 
 /** Every refusal code a runner may print. The Python runners must emit exactly this set (see the contract unit test). */

@@ -38,6 +38,7 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
     ML_FORECASTING_PYTHON: z.string().min(1).default(python),
     // MLOps features share one interpreter (ml/requirements-mlops.txt); each is off by default and gated by ML_ENABLED.
     ML_MLOPS_PYTHON: z.string().min(1).default(python),
+    ML_OPTUNA_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_MLFLOW_ENABLED: z.enum(["true", "false"]).default("false"),
     ML_MLFLOW_TRACKING_URI: z.string().default(""),
     ML_MLFLOW_TRACKING_TOKEN: z.string().default(""),
@@ -64,6 +65,7 @@ export function mlConfiguration(env: NodeJS.ProcessEnv = process.env) {
   if (on(config.ML_MLFLOW_ENABLED) && !/^https?:\/\/[^\s]+$/.test(config.ML_MLFLOW_TRACKING_URI)) throw new Error("ML_MLFLOW_TRACKING_URI must be an http(s) URL of an MLflow tracking server");
   const runner = { python: config.ML_MLOPS_PYTHON, timeoutMs: config.ML_TIMEOUT_MS };
   return { enabled: config.ML_ENABLED === "true", backends,
+    optuna: on(config.ML_OPTUNA_ENABLED) ? runner : null,
     mlflow: on(config.ML_MLFLOW_ENABLED) ? { ...runner, trackingUri: config.ML_MLFLOW_TRACKING_URI, token: config.ML_MLFLOW_TRACKING_TOKEN, prefix: config.ML_MLFLOW_EXPERIMENT_PREFIX } : null };
 }
 

@@ -7,17 +7,19 @@ import { RunRepository } from "../db/repositories.js";
 import type { Principal } from "../db/types.js";
 import type { ArtifactStore, MlBackend } from "./backend.js";
 import { CvSpec, JsonObject, TrainingSnapshot, cohortKey, type DatasetSchemaType, type MetricValue } from "./domain.js";
-import { assertMetricsSupported, assertRankingMetrics } from "./metrics.js";
+import { assertMetricsSupported, assertRankingMetrics, isMetricName, METRICS } from "./metrics.js";
 import { getModel, validateHyperparameters } from "./model-catalog.js";
+import { generateCandidates, SearchSpace, validateSearchSpace, type Point, type SearchSpaceType } from "./search.js";
 import type { TaskType } from "./tasks.js";
-import { audit, MlTrainingService, authorizeMl, transaction } from "./persistence.js";
+import { audit, FeatureDisabled, MlTrainingService, authorizeMl, transaction } from "./persistence.js";
+import { callRunner } from "./runner-process.js";
+import { resolve } from "node:path";
 import { AutoMlInput, planAutoMl } from "./automl.js";
-import { generateCandidates, SearchSpace } from "./search.js";
 import { rankCandidates, type RankableCandidate, type Ranking, type RankingConfigType } from "./ranking.js";
 
 const Name = z.string().trim().min(1).max(120);
 const TERMINAL = ["COMPLETED", "FAILED", "CANCELLED"];
-export type OrchestrationKind = "benchmark" | "search" | "automl";
+export type OrchestrationKind = "benchmark" | "search" | "automl" | "optuna";
 export type OrchestrationStatus = "RUNNING" | "COMPLETED" | "PARTIALLY_COMPLETED" | "FAILED" | "CANCELLED";
 
 const SplitInput = z.object({ train: z.number().gt(0).lt(1), validation: z.number().gt(0).lt(1), test: z.number().gt(0).lt(1), stratify: z.boolean().optional() })
@@ -36,18 +38,90 @@ export const BenchmarkInput = BaseInput.extend({
 export const SearchInput = BaseInput.extend({
   algorithm: Name, fixedHyperparameters: JsonObject.default({}), space: SearchSpace, strategy: z.enum(["grid", "random"]), maxCandidates: z.int().min(1).max(50),
 });
+/**
+ * An Optuna study: the same bounded search space as SearchInput, explored sequentially by Optuna's own sampler. Every trial
+ * is an ordinary durable training job. Budgets: at most 50 trials, at most 4 running at once, and no new trial after the
+ * time limit (trials already running finish normally).
+ */
+export const OptunaInput = BaseInput.extend({
+  algorithm: Name, fixedHyperparameters: JsonObject.default({}), space: SearchSpace, sampler: z.enum(["tpe", "random"]).default("tpe"),
+  maxTrials: z.int().min(1).max(50), parallelism: z.int().min(1).max(4).default(1), timeoutSeconds: z.int().min(60).max(86_400).default(3600),
+});
+export interface OptunaDefinition { algorithm: string; fixedHyperparameters: Record<string, unknown>; space: SearchSpaceType; sampler: "tpe" | "random"; direction: "minimize" | "maximize"; maxTrials: number; parallelism: number; timeoutSeconds: number }
+export interface MlExperimentOptions { optuna?: { python: string; timeoutMs: number } | null | undefined }
+type TrialState = "COMPLETE" | "FAIL" | "RUNNING";
+const AskResponse = z.object({ trials: z.array(z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean(), z.null()]))), sampler: z.string().max(60), seed: z.int().nonnegative(), optuna: z.string().max(40) });
 
 /** What every candidate of one experiment shares; only algorithm and hyperparameters vary. */
 export interface SharedSettings { datasetVersionId: string; featurePipelineId: string; backend: string; taskType: TaskType; seed: number; split: z.infer<typeof SplitInput>; evaluation: z.infer<typeof EvaluationInput>; source: z.infer<typeof Source> }
-export interface CandidatePlan { label: string; algorithm: string; hyperparameters: Record<string, unknown>; origin: "listed" | "search" | "default"; backend?: string | undefined }
+export interface CandidatePlan { label: string; algorithm: string; hyperparameters: Record<string, unknown>; origin: "listed" | "search" | "default" | "optuna"; backend?: string | undefined; trial?: { number: number; sampler: string; seed: number; optuna: string } }
 export interface Plan { kind: OrchestrationKind; parentId: string | null; experimentId: string; name: string; config: unknown; ranking: RankingConfigType; idempotencyKey: string | null; shared: SharedSettings; candidates: CandidatePlan[] }
 interface Row { [column: string]: any }
 
 export const rankingFor = (e: z.infer<typeof EvaluationInput>): RankingConfigType => ({ partition: e.cv ? "cv" : "validation", primaryMetric: e.primaryMetric, secondaryMetrics: e.secondaryMetrics, tolerance: 0 });
 
 export class MlExperimentService {
-  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>) {}
+  constructor(private readonly pool: pg.Pool, private readonly artifacts: ArtifactStore, private readonly backends: ReadonlyMap<string, MlBackend>, private readonly options: MlExperimentOptions = {}) {}
   private get training() { return new MlTrainingService(this.pool, this.artifacts); }
+
+  /** Optuna study: the first `parallelism` trials are asked now; each finished trial asks for the next (advance). */
+  async optuna(principal: Principal, raw: unknown) {
+    authorizeMl(principal, true); const input = OptunaInput.parse(raw);
+    if (!this.options.optuna) throw new FeatureDisabled("optuna");
+    const model = getModel(input.backend, input.algorithm); validateSearchSpace(model, input.space, input.fixedHyperparameters);
+    const primary = input.evaluation.primaryMetric; if (!isMetricName(primary)) throw new ConflictError(`Unknown metric ${primary}`);
+    const definition: OptunaDefinition = { algorithm: input.algorithm, fixedHyperparameters: input.fixedHyperparameters, space: input.space, sampler: input.sampler, direction: METRICS[primary].direction === "higher" ? "maximize" : "minimize", maxTrials: input.maxTrials, parallelism: input.parallelism, timeoutSeconds: input.timeoutSeconds };
+    const { candidates } = await this.ask(definition, input.backend, input.seed, [], Math.min(input.parallelism, input.maxTrials), 0);
+    if (!candidates.length) throw new ConflictError("Optuna proposed no valid hyperparameter combination in the search space");
+    return this.create(principal, "optuna", input, definition, candidates);
+  }
+
+  /**
+   * Asks Optuna for up to `count` trials given the durable history. A combination the model's allowlist refuses (for
+   * example a parameter that only applies to another option) is fed back to Optuna as a failed trial, in memory only, for
+   * at most three rounds; the study never runs a refused combination.
+   */
+  private async ask(d: OptunaDefinition, backend: string, seed: number, history: { params: Record<string, unknown>; state: TrialState; value: number | null }[], count: number, firstNumber: number) {
+    const optuna = this.options.optuna; if (!optuna) throw new FeatureDisabled("optuna");
+    const model = getModel(backend, d.algorithm), names = Object.keys(d.space).sort().join();
+    const accepted: CandidatePlan[] = [], rejected: Point[] = [];
+    for (let round = 0; round < 3 && accepted.length < count; round++) {
+      const parsed = AskResponse.safeParse(await callRunner({ label: "optuna", python: optuna.python, script: resolve(process.cwd(), "ml/optuna_runner.py"), timeoutMs: optuna.timeoutMs, signal: new AbortController().signal,
+        request: { command: "ask", sampler: d.sampler, direction: d.direction, seed, space: d.space, count: count - accepted.length,
+          trials: [...history, ...rejected.map(params => ({ params, state: "FAIL", value: null })), ...accepted.map(c => ({ params: c.hyperparameters, state: "RUNNING", value: null }))] } }));
+      if (!parsed.success) throw new ConflictError("Optuna runner response did not match the contract");
+      for (const params of parsed.data.trials) {
+        if (Object.keys(params).sort().join() !== names) throw new ConflictError("Optuna runner returned parameters outside the search space");
+        try { validateHyperparameters(model, { ...d.fixedHyperparameters, ...params }); } catch { rejected.push(params); continue; }
+        const number = firstNumber + accepted.length;
+        accepted.push({ label: `${d.algorithm}#${number + 1}`, algorithm: d.algorithm, hyperparameters: { ...d.fixedHyperparameters, ...params }, origin: "optuna", trial: { number, sampler: parsed.data.sampler, seed: parsed.data.seed, optuna: parsed.data.optuna } });
+      }
+    }
+    return { candidates: accepted, rejected: rejected.length };
+  }
+
+  /**
+   * Under the orchestration row lock: if the study has budget and free parallel slots, ask Optuna for more trials and queue
+   * them. Trial results come only from durable job records, so a stale worker or a cancelled trial never informs the
+   * sampler. Returns true when Optuna could not propose any valid trial and nothing is running (the study is exhausted).
+   */
+  private async advance(c: pg.PoolClient, tenantId: string, o: Row): Promise<boolean> {
+    const d = o.config.definition as OptunaDefinition, shared = o.config.shared as SharedSettings;
+    if (o.cancel_requested_at || !this.options.optuna || Date.now() >= deadline(o)) return false;
+    const { candidates } = await this.load(c, tenantId, [o.id]);
+    const open = candidates.filter(x => !TERMINAL.includes(x.status)).length;
+    const count = Math.min(d.parallelism - open, d.maxTrials - candidates.length);
+    if (count <= 0) return false;
+    let planned: Awaited<ReturnType<MlExperimentService["ask"]>>;
+    try { planned = await this.ask(d, shared.backend, shared.seed, candidates.map(x => trialOf(x, o.ranking_config)), count, candidates.length); }
+    catch { return false; } // runner unavailable: the next terminal job or manager read retries
+    if (!planned.candidates.length) return open === 0;
+    const principal: Principal = { tenantId, userId: o.created_by, roles: ["tenant_admin"] };
+    const specs = await this.specs(c, principal, shared, o.experiment_id, planned.candidates);
+    await this.enqueue(c, principal, o.id, o.experiment_id, specs, planned.candidates, candidates.length);
+    await audit(c, tenantId, "system", "ml.optuna_trials_asked", { orchestrationId: o.id, trials: planned.candidates.map(x => x.trial!.number), rejected: planned.rejected }, null, "worker");
+    return false;
+  }
 
   async benchmark(principal: Principal, raw: unknown) {
     authorizeMl(principal, true); const input = BenchmarkInput.parse(raw);
@@ -124,11 +198,27 @@ export class MlExperimentService {
   }
   /** Shared by every kind: validate each candidate against the catalog and backend, then queue ordinary jobs. */
   async insert(c: pg.PoolClient, principal: Principal, plan: Plan, configHash: string): Promise<string> {
-    const { shared } = plan;
+    const specs = await this.specs(c, principal, plan.shared, plan.experimentId, plan.candidates);
+    const o = await c.query("INSERT INTO ml_orchestrations(tenant_id,experiment_id,parent_id,kind,name,config,config_hash,ranking_config,idempotency_key,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+      [principal.tenantId, plan.experimentId, plan.parentId, plan.kind, plan.name, JSON.stringify(plan.config), configHash, JSON.stringify(plan.ranking), plan.idempotencyKey, principal.userId]);
+    const id = o.rows[0].id as string;
+    await this.enqueue(c, principal, id, plan.experimentId, specs, plan.candidates, 0);
+    await audit(c, principal.tenantId, principal.userId, `ml.${plan.kind}_created`, { orchestrationId: id, candidates: specs.length });
+    return id;
+  }
+  /** Members are appended in order; a study's later trials continue the ordinals of its earlier ones. */
+  private async enqueue(c: pg.PoolClient, principal: Principal, orchestrationId: string, experimentId: string, specs: unknown[], candidates: CandidatePlan[], offset: number) {
+    for (const [i, spec] of specs.entries()) {
+      const job = await this.training.queueIn(c, principal, { experimentId, spec: spec as never });
+      await c.query("INSERT INTO ml_orchestration_members(tenant_id,orchestration_id,ordinal,job_id,label,candidate) VALUES($1,$2,$3,$4,$5,$6)", [principal.tenantId, orchestrationId, offset + i, job.id, candidates[i]!.label, JSON.stringify(candidates[i])]);
+    }
+  }
+  /** Validates every candidate against the catalog and its backend and returns ordinary training specifications. */
+  private async specs(c: pg.PoolClient, principal: Principal, shared: SharedSettings, experimentId: string, candidates: CandidatePlan[]) {
     const dataset = await c.query("SELECT document FROM ml_dataset_versions WHERE tenant_id=$1 AND id=$2", [principal.tenantId, shared.datasetVersionId]);
     const pipeline = await c.query("SELECT document FROM ml_feature_pipelines WHERE tenant_id=$1 AND id=$2", [principal.tenantId, shared.featurePipelineId]);
     if (!dataset.rowCount || !pipeline.rowCount) throw new NotFoundError("Dataset version or pipeline not found");
-    const experiment = await c.query("SELECT id FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, plan.experimentId]);
+    const experiment = await c.query("SELECT id FROM ml_experiments WHERE tenant_id=$1 AND id=$2", [principal.tenantId, experimentId]);
     if (!experiment.rowCount) throw new NotFoundError("Experiment not found");
     const schema = dataset.rows[0].document.schema as DatasetSchemaType;
     if (schema.target === undefined) throw new ConflictError("Experiments require a dataset target");
@@ -137,7 +227,7 @@ export class MlExperimentService {
     assertRankingMetrics(metrics);
     if (new Set(metrics).size !== metrics.length) throw new ConflictError("Primary and secondary metrics must be distinct");
     const split = { id: randomUUID(), strategy: "random" as const, ...shared.split, stratify: shared.split.stratify ?? shared.taskType === "classification" };
-    const specs = plan.candidates.map(candidate => {
+    return candidates.map(candidate => {
       const backendId = candidate.backend ?? shared.backend;
       const backend = this.backends.get(backendId); if (!backend) throw new ConflictError(`Requested ML backend is not configured: ${backendId}`);
       const model = getModel(backendId, candidate.algorithm);
@@ -147,16 +237,6 @@ export class MlExperimentService {
       backend.validate(TrainingSnapshot.parse({ ...spec, dataset: dataset.rows[0].document, pipeline: pipeline.rows[0].document }));
       return spec;
     });
-    const o = await c.query("INSERT INTO ml_orchestrations(tenant_id,experiment_id,parent_id,kind,name,config,config_hash,ranking_config,idempotency_key,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
-      [principal.tenantId, plan.experimentId, plan.parentId, plan.kind, plan.name, JSON.stringify(plan.config), configHash, JSON.stringify(plan.ranking), plan.idempotencyKey, principal.userId]);
-    const id = o.rows[0].id as string;
-    for (const [ordinal, spec] of specs.entries()) {
-      const job = await this.training.queueIn(c, principal, { experimentId: plan.experimentId, spec: spec as never });
-      const candidate = plan.candidates[ordinal]!;
-      await c.query("INSERT INTO ml_orchestration_members(tenant_id,orchestration_id,ordinal,job_id,label,candidate) VALUES($1,$2,$3,$4,$5,$6)", [principal.tenantId, id, ordinal, job.id, candidate.label, JSON.stringify(candidate)]);
-    }
-    await audit(c, principal.tenantId, principal.userId, `ml.${plan.kind}_created`, { orchestrationId: id, candidates: specs.length });
-    return id;
   }
 
   async list(principal: Principal, kind: OrchestrationKind) {
@@ -168,7 +248,7 @@ export class MlExperimentService {
   async get(principal: Principal, id: string, kind?: OrchestrationKind) {
     authorizeMl(principal);
     let view = await this.read(principal.tenantId, id, this.pool, kind);
-    if (view.orchestration.status === "RUNNING" && view.outcome.terminal && principal.roles.includes("tenant_admin")) { await this.refresh(principal.tenantId, id); view = await this.read(principal.tenantId, id, this.pool, kind); }
+    if (view.orchestration.status === "RUNNING" && (view.outcome.terminal || view.orchestration.kind === "optuna") && principal.roles.includes("tenant_admin")) { await this.refresh(principal.tenantId, id); view = await this.read(principal.tenantId, id, this.pool, kind); }
     return view;
   }
   async ranking(principal: Principal, id: string) { const v = await this.get(principal, id); return { status: v.orchestration.status, final: v.orchestration.status !== "RUNNING", ranking: v.ranking, recommendation: v.recommendation }; }
@@ -202,9 +282,10 @@ export class MlExperimentService {
     await transaction(this.pool, async c => {
       const o = (await c.query("SELECT * FROM ml_orchestrations WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, id])).rows[0];
       if (!o || o.status !== "RUNNING") return;
+      const exhausted = o.kind === "optuna" ? await this.advance(c, tenantId, o) : false;
       const family = await this.family(c, tenantId, id);
       const { candidates } = await this.load(c, tenantId, family);
-      const outcome = this.outcome(o, candidates);
+      const outcome = this.outcome(o, candidates, exhausted);
       if (!outcome.terminal) return;
       await c.query("UPDATE ml_orchestrations SET status=$1,ranking=$2,finalized_at=now() WHERE tenant_id=$3 AND id=$4", [outcome.status, JSON.stringify(outcome.ranking), tenantId, id]);
       await audit(c, tenantId, "system", "ml.experiment_finalized", { orchestrationId: id, status: outcome.status, counts: outcome.counts }, null, "worker");
@@ -242,10 +323,11 @@ export class MlExperimentService {
     return { candidates };
   }
 
-  private outcome(o: Row, candidates: Awaited<ReturnType<MlExperimentService["load"]>>["candidates"]) {
+  private outcome(o: Row, candidates: Awaited<ReturnType<MlExperimentService["load"]>>["candidates"], exhausted = false) {
     const counts = { total: candidates.length, completed: 0, failed: 0, cancelled: 0, open: 0 };
     for (const c of candidates) { if (c.status === "COMPLETED") counts.completed++; else if (c.status === "FAILED") counts.failed++; else if (c.status === "CANCELLED") counts.cancelled++; else counts.open++; }
-    const terminal = counts.open === 0;
+    // A study is over only when nothing runs AND no further trial may start: budget spent, time up, cancelled or exhausted.
+    const terminal = counts.open === 0 && (o.kind !== "optuna" || exhausted || o.cancel_requested_at !== null || counts.total >= o.config.definition.maxTrials || Date.now() >= deadline(o));
     const successes = candidates.filter(c => c.status === "COMPLETED" && c.trainingRunId);
     const keys = new Set(successes.map(c => cohortKey(c.snapshot, c.splitIndices)));
     const rankable: RankableCandidate[] = successes.map(c => ({ jobId: c.jobId, trainingRunId: c.trainingRunId!, label: c.label, algorithm: c.algorithm, hyperparameters: (c.resolvedHyperparameters ?? c.requestedHyperparameters), metrics: c.metrics, performance: c.performance, artifactBytes: c.artifactBytes }));
@@ -274,6 +356,7 @@ export class MlExperimentService {
       outcome: { terminal: persisted || live.terminal, status: persisted ? o.status : live.status, counts: live.counts },
       candidates: candidates.map(({ snapshot, splitIndices: _indices, ...c }) => ({ ...c, lineage: snapshot ? lineage(o, c, snapshot) : null })),
       ranking, final: persisted,
+      ...(o.kind === "optuna" ? { study: studyView(o, candidates) } : {}),
       recommendation: top ? { jobId: top.jobId, trainingRunId: top.trainingRunId, label: top.label, algorithm: top.algorithm, basis: `${ranking.config.primaryMetric} on ${ranking.config.partition}`, note: "Best candidate under this experiment's objective only. It is not registered, promoted or deployed." } : null,
     };
   }
@@ -282,4 +365,19 @@ export class MlExperimentService {
 function lineage(o: Row, c: { orchestrationId: string; jobId: string; trainingRunId: string | null; artifactId: string | null }, raw: unknown) {
   const s = TrainingSnapshot.parse(raw);
   return { experimentId: o.experiment_id as string, orchestrationId: c.orchestrationId, rootOrchestrationId: (o.parent_id ?? o.id) as string, jobId: c.jobId, trainingRunId: c.trainingRunId, datasetVersionId: s.datasetVersionId, featurePipelineId: s.featurePipelineId, backend: s.backend, algorithm: s.algorithm, hyperparameters: s.hyperparameters, seed: s.seed, split: s.split, cv: s.evaluation.cv ?? null, metrics: s.evaluation.metrics ?? null, artifactId: c.artifactId };
+}
+
+const deadline = (o: Row) => new Date(o.created_at).getTime() + (o.config.definition as OptunaDefinition).timeoutSeconds * 1000;
+/** A trial's Optuna state and objective, derived from its durable job: only a completed job with the objective metric counts. */
+function trialOf(c: { status: string; requestedHyperparameters: Record<string, unknown>; metrics: MetricValue[] }, rank: RankingConfigType): { params: Record<string, unknown>; state: TrialState; value: number | null } {
+  const value = c.metrics.find(m => m.name === rank.primaryMetric && m.partition === rank.partition && m.fold == null)?.value ?? null;
+  const state: TrialState = c.status === "COMPLETED" ? (value === null ? "FAIL" : "COMPLETE") : TERMINAL.includes(c.status) ? "FAIL" : "RUNNING";
+  return { params: c.requestedHyperparameters, state, value: state === "COMPLETE" ? value : null };
+}
+function studyView(o: Row, candidates: { ordinal: number; label: string; status: string; jobId: string; trainingRunId: string | null; requestedHyperparameters: Record<string, unknown>; metrics: MetricValue[] }[]) {
+  const d = o.config.definition as OptunaDefinition, rank = o.ranking_config as RankingConfigType;
+  const trials = candidates.map(c => { const t = trialOf(c, rank); return { number: c.ordinal, label: c.label, params: t.params, state: t.state, value: t.value, jobId: c.jobId, trainingRunId: c.status === "COMPLETED" ? c.trainingRunId : null }; });
+  const better = (a: number, b: number) => d.direction === "maximize" ? a > b : a < b;
+  const best = trials.filter(t => t.state === "COMPLETE").reduce<(typeof trials)[number] | null>((b, t) => !b || better(t.value!, b.value!) ? t : b, null);
+  return { sampler: d.sampler, direction: d.direction, objective: { metric: rank.primaryMetric, partition: rank.partition }, maxTrials: d.maxTrials, parallelism: d.parallelism, deadline: new Date(deadline(o)).toISOString(), trials, best };
 }
