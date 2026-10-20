@@ -353,3 +353,210 @@ A full-diff scan found no private repository names, developer paths, private pla
 ## Verdict
 
 The Phase 4 (M1–M9) selective port is complete. Every implemented Phase 4 capability works in the public edition through its real framework, on public PostgreSQL storage and with public authorization. Contract v1 and Phase 1–3 behavior are preserved. The fresh and populated-upgrade migration paths pass. The full sequential regression passed with no failures. The work is nine feature and integration commits plus this report, all local; nothing was pushed.
+
+# ML Phase 5 (MLOps) public port review
+
+The port comes from private revision `1631f40` on the private `main` branch. It is the verified end of Phase 5:
+
+- milestones A `2549d38`, B `928dcaf`, C `df1eda7`, E `05f08a8`, F `e570c07`, G1 `0492932`, G2 `1f4b438` and D `93dd5da`;
+- the audit corrections `2a2b58c`, including migration 016;
+- the fixture isolation fix from `ce9a57a`.
+
+The two commits after that (`dc2802b`, `1631f40`) change only the private verification report.
+
+The private report for that revision records 896 passing tests across 112 files. Those are private results; the public results are below.
+
+The public base was `f34e93e`: the Phase 4 port plus the port of the embedding row-cap fix. The checkout was clean, and `main` matched `origin/main`. The work was done on the branch `feature/ml-phase5-public` in a separate worktree. The private repository was read-only throughout.
+
+The method was the same as for Phase 4. For each private milestone, every file it changed was translated to public names:
+
+- runner paths: `ml/*_runner.py`, `ml/requirements*.txt`;
+- `authorizeMl` instead of the private role check;
+- a request-scoped `PostgresArtifactStore` instead of the configured filesystem store;
+- `tenant_admin` instead of the private manager role.
+
+Each file was then three-way merged against the private revision before that milestone. Conflicts were resolved by hand, and every clean merge was scanned for private names. Each milestone was typechecked, and its targeted tests were run before it was committed.
+
+## Commits
+
+| Public commit | Content |
+| --- | --- |
+| `0925cab` | A: experiment metadata, filtered listing, derived status, run history, comparison, reproduction, lineage (migration 008) |
+| `834626c` | B: MLflow export and metadata import (migration 009) |
+| `d21bc24` | C: Optuna studies over durable jobs (migration 010) |
+| `71c76ff` | E: registry policies, approvals, separation of duties, lifecycle events (migration 011) |
+| `047112d` | F: ONNX export, parity verification and ONNX Runtime inference (migration 012) |
+| `54d6a90` | G1: deployments with version-pinned revisions (migration 013) |
+| `ca7745c` | G2: reference profiles, drift, ground-truth feedback, deployment monitoring (migration 014) |
+| `ba9dc5d` | D: Matplotlib reports and the `mlops` CI job (migration 015) |
+| `636a852` | The private audit corrections (migration 016) and the fixture isolation fix |
+| `4631a42` | Public JWT membership and RLS test of the MLOps routes |
+| `a163f42` | Public documentation (`docs/ml-mlops.md`, `docs/ml.md`, README, package contents) |
+| `6d5a21c` | Fixes from the public review (see Security review) |
+
+## Classification
+
+| Capability | Classification | Public disposition |
+| --- | --- | --- |
+| Experiment tracking, run history, comparison, reproduction and lineage | PUBLIC-CORE | Ported. `POST /ml/experiments` still accepts `{name}`. Lineage checks blob bytes through the public store |
+| MLflow export and metadata import | PUBLIC-CORE | Ported. Operator-configured server only; no model artifacts move. Foreign-tenant runs are refused on import. Direct access to a shared server is not isolated, and the docs say so |
+| Optuna studies (TPE, random) over durable jobs, worker sweep | PUBLIC-CORE | Ported. No second scheduler; no pruning |
+| Registry governance: policies, thresholds, approvals, readiness, lifecycle events, governed endpoints | PUBLIC-ADAPTATION | Approvers are a `tenant_admin` other than the registrant. Service identities can never approve. Older versions recover their registrant from the audit log. A version without a registrant cannot be approved. Enforced by the service and the database |
+| ONNX export (scikit-learn, numeric features), parity, runtime gate | PUBLIC-ADAPTATION | ONNX bytes are PostgreSQL blobs. An export over the 16 MB limit is recorded as `UNSUPPORTED` (`output_limit_exceeded`) |
+| Deployments: revisions, validation, activation, update, rollback, deactivation | PUBLIC-CORE | Ported. Synchronous in-process serving through the existing endpoints |
+| Drift (PSI, Jensen-Shannon), feedback, deployment monitoring, retention | PUBLIC-ADAPTATION | Merged with the existing public endpoint summary (`GET /ml/endpoints/:id/monitoring` gains `p50_latency_ms` and `failures_by_category`). The deployment monitor is `GET /ml/deployments/:id/monitoring` |
+| Matplotlib reports | PUBLIC-ADAPTATION | Report images are PostgreSQL blobs |
+| Configuration, CI, packaging | PUBLIC-ADAPTATION | One optional MLOps interpreter with four feature flags. Public default interpreter. The `mlops` CI job. The package ships the four runners, `ml/requirements-mlops.txt` and `docs/ml-mlops.md` |
+| Private manager and viewer roles, filesystem artifact store, `ML_ARTIFACT_ROOT`, the private endpoint `/monitor` route | PRIVATE-ONLY | Not ported. A test asserts that both `/monitor` routes return 404 |
+| Private planning and verification documents (`phase-5-report.md`, `ml-platform.md`) | PRIVATE-ONLY | Not copied. The public facts are in `docs/ml-mlops.md` |
+| Managed serving, hosting, fleets, traffic splitting, canary rollout, autoscaling, GPU serving | — | Not present in private Phase 5 either, so there was nothing to exclude |
+
+Nothing implemented in private Phase 5 was deferred.
+
+## Public-specific changes
+
+- **Route configuration.** `MlRouteConfiguration` drops the private `artifacts` key, and `createApp` accepts it, so the existing callers that pass `{enabled, backends}` keep compiling.
+- **Registration is idempotent.** Public registration is idempotent per attempt, which the private repository does not enforce. Three private tests registered the same attempt twice to get a second version; they now train a second attempt.
+- **Tests on PostgreSQL blobs.** Tests that deleted artifact files now remove the blob beneath the append-only trigger, as table owner.
+- **Missing CI coverage.** The full-catalog ONNX parity check (`tests/unit/ml-onnx-runner.test.ts`) is listed in the `mlops` job. The private job did not list it. The private repository has since added it in its own commit.
+- **Translation mistake.** Translating `python/` to `ml/` also rewrote `tests/python/check_onnx.py` to a non-existent `tests/ml/` path. The test found it, and it is fixed.
+
+## Migrations
+
+**Numbering.** The numbers 008–016 were free in the public chain. Every migration depends only on objects the public chain already provides: `durable_agent_api`, `reject_evaluation_evidence_update`, `tenant_memberships`, `audit_events` and the ML tables.
+
+**Tenant isolation.** Each new table has the `tenant_isolation` RLS policy. Trigger functions are `SECURITY INVOKER`. `ml_prune_monitoring` is revoked from `PUBLIC`.
+
+**Fresh database.** Migrations 001–016 applied from empty, and `db:check` reported 16 of 16.
+
+**Populated upgrade.** The public Phase 4 code (`f34e93e`) first built a database with migrations 001–007, in this state:
+
+- a real scikit-learn ridge model registered by user A, promoted and served (x = 10 predicts 21.010737758030174);
+- a second version registered by user B and left `REGISTERED`.
+
+The database was then migrated to 016 and checked with the Phase 5 code. All 21 assertions passed:
+
+| Area | Assertions |
+| --- | --- |
+| Data preservation | All 20 ML tables kept their row counts. All three Phase 4 blobs read back and verified |
+| Registrants | Backfilled from the audit log: A for the first version, B for the second. No events were invented |
+| Serving | The old endpoint returns the identical prediction. Its reference profile was built on first use |
+| Tracking and lineage | Experiment status is derived as `COMPLETED`. Lineage is clean with `verify=true` |
+| Governance | A new approval policy holds the older versions. B cannot approve their own version, and A can. B's version reached `READY`. The tightened policy refuses the already-`READY` first version as a deployment revision |
+| Deployments | The approved older version deploys, activates and serves |
+| Database guards | Another tenant sees 0 rows in 10 ML tables under the API role. An invalid deployment transition, self-approval and changing the registrant are all refused by the database |
+| Configuration | No filesystem store is configured |
+
+`db:check` reported 16 of 16.
+
+## Verification
+
+**Baseline** (public `f34e93e`, migrations 001–007, every real-framework interpreter set, one file per process, sequentially):
+
+- 101 files: 864 passed, 0 failed, 1 skipped; every process exited 0.
+- The skip was the CI-only Transformers pin check, gated on `ML_TRANSFORMERS_JOB`. Rerun with that flag, its file passed 2 of 2.
+- The run was interrupted twice by host memory pressure and resumed. Interrupted files were rerun, never counted as passed.
+
+**After the port** (final branch `6d5a21c`, fresh database, migrations 001–016, every interpreter set):
+
+- Set: `ML_TEST_MLOPS_PYTHON` with `mlflow==3.16.1` for a real local tracking server, and every CI job flag including `ML_TRANSFORMERS_JOB`.
+- 114 files, one per process, sequentially: 917 passed, 0 failed, 0 skipped. Every process exited 0.
+
+| Suite | Files | Passed |
+| --- | ---: | ---: |
+| MLOps integration (tracking, MLflow, Optuna, governance, ONNX, deployments, monitoring, reports, JWT/RLS) | 9 | 34 |
+| MLOps unit (drift, report curves, MLOps runtime pins, full-catalog ONNX parity) | 4 | 10 |
+| Conformance (all backends) | 23 | 445 |
+| Phase 1–4 ML integration | 16 | 107 |
+| Phase 1–4 ML unit | 32 | 165 |
+| Non-ML integration | 17 | 106 |
+| Non-ML unit | 13 | 50 |
+
+The increase over the baseline:
+
+- **44 tests:** the new MLOps tests.
+- **9 tests:** the CI-gated Transformers checks, registered only when the flag is set. That is one per Transformers conformance file, plus the pin check.
+
+**Interrupted file.** One file, `transformers-text-classifier` conformance, failed once with a refusal code of `undefined`. Its raw-envelope helper has a 120-second timeout, and under host memory pressure the runner took longer than that just to start. Phase 5 changes nothing on that path. Rerun alone, the file passed 11 of 11, and that rerun is the recorded result.
+
+**Mutation checks.** Each public adaptation was broken on purpose, and each break made its test fail:
+
+- removing the service-identity check from the service;
+- removing it from the database trigger;
+- removing the oversize-ONNX outcome;
+- restoring the old study sweep.
+
+**Build and types.** The production build passes. `tsc --noEmit` reports the same 22 diagnostics as the Phase 4 baseline, and none in Phase 5 files.
+
+**Interpreters** (local venvs; Python 3.13.12 unless noted):
+
+| Interpreter | Packages |
+| --- | --- |
+| MLOps | onnx 1.23.0, onnxruntime 1.30.0, skl2onnx 1.20.0, optuna 5.0.0, matplotlib 3.11.2, mlflow 3.16.1, with the scikit-learn pins of `ml/requirements.txt` |
+| Others | As in Phase 4 |
+
+## CI and packaging
+
+- **CI.** The workflow has a new `mlops` job beside `test`, `tensorflow`, `jax`, `gbdt` and `transformers`. It installs `ml/requirements-mlops.txt` and `mlflow==3.16.1`, and runs every MLOps file, including the full-catalog ONNX check. `ML_MLOPS_JOB` makes a missing interpreter fail the job. The YAML parses.
+- **Package contents.** `npm pack --dry-run` lists 206 files:
+  - 28 under `ml/`, including the four MLOps runners and `requirements-mlops.txt`;
+  - migrations 001–016;
+  - `docs/ml-mlops.md`.
+
+  It contains no tests, caches, venvs, environment files or private documents.
+- **Optional features.** Every MLOps runner feature is off by default. A disabled feature answers 503 `ml_feature_not_configured`.
+
+## Security review
+
+**Process.** One focused independent review covered the public diff. It reproduced its database findings in a scratch database. It found no critical or high issues, and it found no private names, paths, roles or commit hashes in code, docs or commit messages.
+
+**Fixed (`6d5a21c`):**
+
+- **No registrant (low).** A version with no recorded registrant could be approved by anyone. The service and the trigger now refuse it.
+- **Sweep starvation (low).** The worker sweep only ever looked at the 10 oldest running studies. It now picks only studies it can move (cancelled, past their deadline, or with no open trial), in random order. A test covers an older busy study.
+
+**Documented, not changed:**
+
+- **Approval is opt-in per registry entry (medium, inherited design).** Any `tenant_admin` can create an entry without a policy and promote a version there.
+- **Training-value summaries (low, inherited).** Drift references summarize training values: numeric decile edges and the 20 most frequent values of string and boolean features. Every member can read them.
+- **Identity-provider dependence.** Meticule cannot tell when one person holds two identities.
+
+**Declined: approvers without a membership row (low).** The trigger also accepts an approver with no membership row. JWT authentication already requires an active membership. In development-header mode any identity can be asserted, so such a check would add nothing there.
+
+**Checked and clean:**
+
+- RLS on all 14 new tables;
+- deserialization (pickle only for scikit-learn artifacts under the compatibility check; `allow_pickle=False` everywhere else);
+- the ONNX gate;
+- download of `VERIFIED` exports only;
+- MLflow token isolation;
+- Optuna cancellation and locking;
+- deployment triggers;
+- owner-only retention;
+- inert SVG serving.
+
+## Not verified
+
+- **Hosted CI.** The GitHub Actions workflow, including the new `mlops` job, has not been run from here.
+- **GPU.** No GPU was tested. Phase 5 adds no GPU code, and ONNX Runtime uses the CPU provider.
+
+## Remaining limitations
+
+- **ONNX** covers scikit-learn classification and regression over numeric features only.
+- **Optuna** has no pruning; samplers are TPE and random.
+- **Serving** is synchronous in-process inference: no separate serving process, traffic splitting, canary or autoscaling.
+- **Drift** uses binned PSI and Jensen-Shannon on tabular features; the PSI bands are conventions, not significance tests.
+- **MLflow** uses one server per deployment and moves metadata only.
+- **Reports** draw ROC and precision-recall only where scores exist, and score at most 5,000 rows.
+- **Storage.** Every blob, ONNX export and report image is limited to 16 MB.
+- **Retention.** Monitoring profiles are pruned only when an operator runs `ml_prune_monitoring`.
+
+## Verdict
+
+The Phase 5 selective port is complete. Every implemented private Phase 5 capability works in the public edition:
+
+- through its real framework and runner;
+- on public PostgreSQL blob storage;
+- with public JWT membership, `tenant_admin` writes and RLS.
+
+The private audit corrections are included, and the public review's confirmed findings are fixed. Earlier behavior is preserved, and the fresh and populated-upgrade migration paths pass. The full sequential regression passed with no failures and no skips.
