@@ -44,7 +44,10 @@ SPEC = {"accuracy": ({C}, "higher", True, False), "precision": ({C}, "higher", T
         "anomaly_recall": ({A}, "higher", True, False), "anomaly_f1": ({A}, "higher", True, False),
         "threshold_calibration_error": ({A}, "lower", False, True), "retrieval_precision_at_1": ({E}, "higher", True, False),
         "retrieval_mrr": ({E}, "higher", True, False), "mean_pairwise_cosine": ({E}, "lower", False, True),
-        "wer": ({T}, "lower", True, False), "cer": ({T}, "lower", True, False)}
+        "wer": ({T}, "lower", True, False), "cer": ({T}, "lower", True, False),
+        "token_cross_entropy": ({"language_modeling"}, "lower", False, False),
+        "perplexity": ({"language_modeling"}, "lower", False, False),
+        "next_token_accuracy": ({"language_modeling"}, "higher", False, False)}
 results["registry_matches_phase4_spec"] = {n: (set(m[0]), m[1], m[2], m[3]) for n, m in common.METRICS.items()} == SPEC
 PHASE3 = {"accuracy": "higher", "precision": "higher", "recall": "higher", "f1": "higher", "roc_auc": "higher",
           "log_loss": "lower", "mae": "lower", "mse": "lower", "rmse": "lower", "r2": "higher"}
@@ -52,12 +55,13 @@ results["phase3_tables_unchanged"] = (common.TASK_METRICS[C] == ("accuracy", "pr
                                       and common.TASK_METRICS[R] == ("mae", "mse", "rmse", "r2")
                                       and list(sklearn_runner.DIRECTIONS.items()) == list(PHASE3.items())
                                       and list(common.DIRECTIONS.items())[:10] == list(PHASE3.items()))
-results["derived_tables_consistent"] = (set(common.DIRECTIONS) == set(SPEC) and set(common.TASK_METRICS) == {C, R, F, A, E, T}
+results["derived_tables_consistent"] = (set(common.DIRECTIONS) == set(SPEC) and set(common.TASK_METRICS) == {C, R, F, A, E, T, "language_modeling"}
                                         and all(n in common.TASK_METRICS[t] for n, m in SPEC.items() for t in m[0])
-                                        and common.LABEL_FREE == common.DIAGNOSTIC == {"threshold_calibration_error", "mean_pairwise_cosine"})
+                                        and common.DIAGNOSTIC == {"threshold_calibration_error", "mean_pairwise_cosine"}
+                                        and common.LABEL_FREE == common.DIAGNOSTIC | {"token_cross_entropy", "perplexity", "next_token_accuracy"})
 DEFAULTS = {C: (["accuracy"], None), R: (["mae", "mse"], None), F: (["mae", "rmse"], None),
             A: (["average_precision"], ["threshold_calibration_error"]), E: (["retrieval_precision_at_1"], ["mean_pairwise_cosine"]),
-            T: (["wer", "cer"], None)}
+            T: (["wer", "cer"], None), "language_modeling": (["token_cross_entropy", "perplexity"], ["token_cross_entropy", "perplexity"])}
 results["default_metrics_per_task"] = all(
     common.default_metrics(t, True) == labelled and (value_error(common.default_metrics, t, False) if unlabelled is None else common.default_metrics(t, False) == unlabelled)
     for t, (labelled, unlabelled) in DEFAULTS.items())
