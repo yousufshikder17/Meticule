@@ -65,6 +65,11 @@ const RUNNER_CODES: Record<string, MlFailureCategory> = {
   unsupported_task: "unsupported_capability",
   undefined_metric: "invalid_request",
   invalid_time_series: "invalid_request",
+  invalid_tokens: "invalid_request",
+  quantization_runtime_unavailable: "backend_unavailable",
+  quantization_runtime_incompatible: "runtime_incompatible",
+  cuda_memory_budget_exceeded: "device_unavailable",
+  cuda_out_of_memory: "device_unavailable",
   invalid_media: "invalid_request",
   // Pretrained models under the platform-wide model root (transformers backend).
   pretrained_model_unavailable: "backend_unavailable",

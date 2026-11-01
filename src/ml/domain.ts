@@ -75,7 +75,7 @@ export const TrainingPolicy = z.strictObject({
   // Mixed precision is explicit and CUDA-only. CPU training stays fp32.
   precision: z.enum(PRECISIONS).default("fp32"),
 }).refine(p => p.precision === "fp32" || p.device === "cuda", "Mixed precision requires device cuda").nullable().default(null);
-export const TrainingSpec = z.object({ datasetVersionId: Id, featurePipelineId: Id, backend: Name, algorithm: Name, hyperparameters: JsonObject.default({}), seed: z.int().min(0).max(4_294_967_295), training: TrainingPolicy, split: SplitDefinition, evaluation: EvaluationSpec.default({}), source: z.object({ revision: z.string().min(1).max(200), repository: z.string().max(500).optional(), dirty: z.boolean() }).nullable().default(null) });
+export const TrainingSpec = z.object({ distillation: z.never().optional(), teacher: z.never().optional(), execution: z.never().optional(), datasetVersionId: Id, featurePipelineId: Id, backend: Name, algorithm: Name, hyperparameters: JsonObject.default({}), seed: z.int().min(0).max(4_294_967_295), training: TrainingPolicy, split: SplitDefinition, evaluation: EvaluationSpec.default({}), source: z.object({ revision: z.string().min(1).max(200), repository: z.string().max(500).optional(), dirty: z.boolean() }).nullable().default(null) });
 export const TrainingSnapshot = TrainingSpec.extend({ dataset: DatasetVersion, pipeline: FeaturePipeline });
 export const TRAINING_STATES = ["QUEUED", "PREPARING", "TRAINING", "EVALUATING", "SAVING", "COMPLETED", "FAILED", "CANCELLED"] as const;
 export type TrainingState = typeof TRAINING_STATES[number];

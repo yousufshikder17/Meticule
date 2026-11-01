@@ -71,6 +71,7 @@ const INHERITED = ["PATH", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP",
 function runnerEnvironment(): NodeJS.ProcessEnv {
   // Hugging Face libraries are pinned offline with no telemetry; no token or cache path is ever inherited.
   const env: NodeJS.ProcessEnv = { OMP_NUM_THREADS: "1", OPENBLAS_NUM_THREADS: "1", MKL_NUM_THREADS: "1", PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8",
+    METICULE_RUNNER_PARENT_PID: String(process.pid), METICULE_RUNNER_PARENT_STARTED: String((Date.now() - process.uptime() * 1000) / 1000),
     HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_DATASETS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1", TOKENIZERS_PARALLELISM: "false" };
   for (const name of INHERITED) if (process.env[name] !== undefined) env[name] = process.env[name];
   return env;

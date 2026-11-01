@@ -5,7 +5,7 @@ import type { TaskType } from "./tasks.js";
 
 type Scalar = string | number | boolean | null;
 // Defaults may be scalars or bounded integer lists (neural-network layer widths).
-type DefaultValue = Scalar | number[];
+type DefaultValue = Scalar | number[] | string[];
 // One declaration drives validation, discovery and search-space checks; unknown parameters are never forwarded.
 export type ParameterSpec =
   | { kind: "int"; min: number; max: number; nullable?: boolean; default: number | null }
@@ -16,6 +16,7 @@ export type ParameterSpec =
   | { kind: "intList"; minItems: number; maxItems: number; min: number; max: number; default: number[] }
   // A local model reference (pretrained weights provisioned under the model root): a bounded identifier, never a path.
   // Nullable with default null; search spaces and AutoML reject it.
+  | { kind: "choiceList"; values: readonly string[]; minItems: number; maxItems: number; default: string[] }
   | { kind: "name"; default: null };
 const MODEL_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** Column types a model reads as features, and how many feature columns it takes. */
@@ -59,6 +60,7 @@ function schemaFor(parameters: Record<string, ParameterSpec>): z.ZodType<Record<
     else if (spec.kind === "float") { type = spec.openMin ? z.number().gt(spec.min).max(spec.max) : z.number().min(spec.min).max(spec.max); if (spec.nullable) type = type.nullable(); }
     else if (spec.kind === "bool") type = z.boolean();
     else if (spec.kind === "intList") type = z.array(z.int().min(spec.min).max(spec.max)).min(spec.minItems).max(spec.maxItems);
+    else if (spec.kind === "choiceList") type = z.array(z.enum(spec.values as [string, ...string[]])).min(spec.minItems).max(spec.maxItems).refine(v => new Set(v).size === v.length, "Duplicate choices");
     else if (spec.kind === "name") type = z.string().regex(MODEL_NAME).nullable();
     else type = z.union(spec.values.map(v => z.literal(v)) as unknown as [z.ZodType, z.ZodType]);
     shape[name] = type.optional();
