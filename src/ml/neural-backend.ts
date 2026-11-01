@@ -22,6 +22,7 @@ export interface NeuralRunnerOptions {
   tasks?: BackendCapabilities["tasks"];
   inputs?: BackendCapabilities["inputs"];
   preprocessing?: BackendCapabilities["preprocessing"];
+  privateTemporaryDirectory?: boolean;
 }
 
 /**
@@ -44,7 +45,7 @@ export class NeuralRunnerBackend extends RunnerBackend {
       tasks: options.tasks ?? ["classification", "regression"],
       inputs: options.inputs ?? TABULAR_COLUMN_TYPES,
     };
-    super({ id: options.id, capabilities, python: options.python, script: options.script, timeoutMs: options.timeoutMs });
+    super({ id: options.id, capabilities, python: options.python, script: options.script, timeoutMs: options.timeoutMs, ...(options.privateTemporaryDirectory ? { privateTemporaryDirectory: true } : {}) });
     this.checkpointFormat = options.checkpointFormat;
   }
 

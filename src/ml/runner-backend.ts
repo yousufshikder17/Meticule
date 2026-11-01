@@ -24,6 +24,7 @@ export interface RunnerBackendOptions {
   python: string;
   script: string;
   timeoutMs: number;
+  privateTemporaryDirectory?: boolean;
 }
 
 /**
@@ -37,6 +38,7 @@ export abstract class RunnerBackend implements MlBackend {
   protected readonly python: string;
   protected readonly script: string;
   protected readonly timeoutMs: number;
+  private readonly privateTemporaryDirectory: boolean;
 
   protected constructor(options: RunnerBackendOptions) {
     if (options.capabilities.artifactFormats.length !== 1) throw new Error(`${options.id} must declare exactly one artifact format`);
@@ -45,6 +47,7 @@ export abstract class RunnerBackend implements MlBackend {
     this.python = options.python;
     this.script = options.script;
     this.timeoutMs = options.timeoutMs;
+    this.privateTemporaryDirectory = options.privateTemporaryDirectory ?? false;
   }
 
   /**
@@ -116,7 +119,7 @@ export abstract class RunnerBackend implements MlBackend {
     this.validate(snapshot);
     if (signal.aborted) throw new MlBackendFailure("cancelled", `${this.id} ${command} was cancelled`);
     const task = getModel(this.id, snapshot.algorithm).taskType, contract = contractFor(snapshot, task);
-    return callRunner({ label: this.id, python: this.python, script: this.script, timeoutMs: this.timeoutMs, signal, contract,
+    return callRunner({ label: this.id, python: this.python, script: this.script, timeoutMs: this.timeoutMs, signal, contract, privateTemporaryDirectory: this.privateTemporaryDirectory,
       request: { ...this.requestExtras(), command, snapshot, rows, ...extra, ...(contract === ML_BACKEND_CONTRACT_V2 ? { task } : {}) } });
   }
 

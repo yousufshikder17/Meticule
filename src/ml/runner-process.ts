@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ML_BACKEND_CONTRACT, MlBackendFailure, categoryForRunnerCode, type MlBackendContract, type MlFailureCategory } from "./contract.js";
 
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -18,6 +21,8 @@ export interface RunnerCall {
   contract?: MlBackendContract;
   /** Extra variables for this runner only (e.g. an MLflow token). Never logged and never inherited by other runners. */
   environment?: Record<string, string>;
+  /** Own scratch assets so a killed adapter interpreter cannot leave model copies behind. */
+  privateTemporaryDirectory?: boolean;
 }
 
 /**
@@ -25,7 +30,17 @@ export interface RunnerCall {
  * The child is killed on timeout or abort (lease loss, cancellation); it never outlives the call.
  * Every request carries the contract version, and every response must echo exactly that version (A2).
  */
-export function callRunner({ label, python, script, timeoutMs, request, signal, contract = ML_BACKEND_CONTRACT, environment = {} }: RunnerCall): Promise<unknown> {
+export async function callRunner(call: RunnerCall): Promise<unknown> {
+  if (!call.privateTemporaryDirectory) return runProcess(call);
+  const directory = await mkdtemp(join(tmpdir(), "meticule-runner-"));
+  try {
+    return await runProcess({ ...call, environment: { ...call.environment, TEMP: directory, TMP: directory, TMPDIR: directory } });
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+function runProcess({ label, python, script, timeoutMs, request, signal, contract = ML_BACKEND_CONTRACT, environment = {}, privateTemporaryDirectory = false }: RunnerCall): Promise<unknown> {
   return new Promise((resolveCall, reject) => {
     const envelope = { ...request, contract };
     const command = String(request.command);
@@ -38,7 +53,12 @@ export function callRunner({ label, python, script, timeoutMs, request, signal, 
     child.stderr.on("data", (chunk: Buffer) => { errors = (errors + chunk.toString("utf8")).slice(-4096); });
     child.stdin.on("error", () => undefined);
     // A runner that cannot start is backend_unavailable. The OS error is not forwarded: it names the interpreter path.
-    child.once("error", () => { clearTimeout(timeout); reject(signal.aborted ? new MlBackendFailure("cancelled", `${label} ${command} was cancelled`) : new MlBackendFailure("backend_unavailable", `${label} runner could not start`)); });
+    child.once("error", () => {
+      clearTimeout(timeout);
+      // Wait for the guarded interpreter's pipes to close before removing its scratch directory.
+      if (privateTemporaryDirectory && signal.aborted && child.pid !== undefined) return;
+      reject(signal.aborted ? new MlBackendFailure("cancelled", `${label} ${command} was cancelled`) : new MlBackendFailure("backend_unavailable", `${label} runner could not start`));
+    });
     child.once("close", code => {
       clearTimeout(timeout);
       if (signal.aborted) { reject(new MlBackendFailure("cancelled", `${label} ${command} was cancelled`)); return; }

@@ -11,7 +11,7 @@ export const PEFT_CHECKPOINT_FORMAT="peft-lora-checkpoint-v1";
 export class PeftBackend extends NeuralRunnerBackend {
   constructor(python:string,timeoutMs=120_000,script=resolve(process.cwd(),"ml/lora_backend.py"),private readonly modelRoot="") {
     super({id:"peft",artifactFormat:PEFT_ARTIFACT_FORMAT,checkpointFormat:PEFT_CHECKPOINT_FORMAT,
-      devices:PEFT_DEVICES,mixedPrecision:false,python,script,timeoutMs,tasks:["language_modeling"],inputs:["tokens"],preprocessing:[]});
+      devices:PEFT_DEVICES,mixedPrecision:false,python,script,timeoutMs,tasks:["language_modeling"],inputs:["tokens"],preprocessing:[],privateTemporaryDirectory:true});
   }
   protected override requestExtras():Record<string,unknown>{return {modelRoot:this.modelRoot};}
   override validate(snapshot:Snapshot):void {
