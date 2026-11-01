@@ -129,7 +129,7 @@ export class MlMonitoringService {
 
   /** Request, latency, failure, output and ground-truth summary of a deployment's endpoints, per model version. */
   async monitor(principal: Principal, deploymentId: string, raw: unknown) {
-    authorizeMl(principal); const window = this.window(WindowInput.parse(raw));
+    authorizeMl(principal); const window = await this.window(WindowInput.parse(raw));
     const endpoints = await this.endpoints(principal.tenantId, deploymentId);
     const args = [principal.tenantId, endpoints, window.from, window.to];
     const base = (await this.pool.query(`SELECT model_version_id,count(*)::int AS requests,COALESCE(sum(count),0)::bigint AS rows,count(*) FILTER(WHERE status='COMPLETED')::int AS completed,
@@ -167,7 +167,7 @@ export class MlMonitoringService {
    * reference. Persisted with its inputs; below `minSamples` observed rows the status is insufficient_data.
    */
   async evaluateDrift(principal: Principal, deploymentId: string, raw: unknown) {
-    authorizeMl(principal, true); const input = DriftInput.parse(raw), window = this.window(input);
+    authorizeMl(principal, true); const input = DriftInput.parse(raw), window = await this.window(input);
     const endpoints = await this.endpoints(principal.tenantId, deploymentId);
     // Only a version one of the deployment's revisions pins; by default the serving one, else the one that served last.
     const version = (await this.pool.query(`SELECT r.model_version_id FROM ml_deployments d JOIN ml_deployment_revisions r ON r.tenant_id=d.tenant_id AND r.deployment_id=d.id
@@ -212,8 +212,10 @@ export class MlMonitoringService {
     return (await this.pool.query("SELECT DISTINCT endpoint_id FROM ml_deployment_events WHERE tenant_id=$1 AND deployment_id=$2 AND endpoint_id IS NOT NULL", [tenantId, deploymentId])).rows.map(r => r.endpoint_id);
   }
   /** Explicit, bounded windows: default the last 24 hours, at most DRIFT.maxWindowDays. */
-  private window(input: { from?: string | undefined; to?: string | undefined }) {
-    const to = input.to ? new Date(input.to) : new Date(), from = input.from ? new Date(input.from) : new Date(to.getTime() - 86_400_000);
+  private async window(input: { from?: string | undefined; to?: string | undefined }) {
+    // DB timestamps have microseconds; round its clock up to a replayable millisecond exclusive bound.
+    const to = input.to ? new Date(input.to) : (await this.pool.query<{ bound: Date }>("SELECT date_trunc('milliseconds',clock_timestamp()) + interval '1 millisecond' AS bound")).rows[0]!.bound;
+    const from = input.from ? new Date(input.from) : new Date(to.getTime() - 86_400_000);
     if (!(from < to)) throw new ConflictError("Window start must precede its end");
     if (to.getTime() - from.getTime() > DRIFT.maxWindowDays * 86_400_000) throw new ConflictError(`Windows are limited to ${DRIFT.maxWindowDays} days`);
     return { from: from.toISOString(), to: to.toISOString() };

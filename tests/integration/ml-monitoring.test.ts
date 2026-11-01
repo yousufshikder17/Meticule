@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Row, Snapshot } from "../../src/ml/domain.js";
 import { MlBackendFailure } from "../../src/ml/contract.js";
 import { MlDeploymentService } from "../../src/ml/deployments.js";
@@ -27,6 +27,21 @@ async function served(store: Parameters<typeof trainedModel>[0]) {
 }
 
 describe("Phase 5 monitoring and drift", () => {
+  it("uses database time for default windows while preserving explicit exclusive bounds (injected rounded application clock)", () => withStore(async store => {
+    const s = await served(store); const prediction = await s.batch([1, 2, 3]);
+    const timestamp = (await pool.query("SELECT created_at FROM ml_prediction_profiles WHERE tenant_id=$1 AND prediction_id=$2", [manager.tenantId, prediction.id])).rows[0].created_at as Date;
+    const exclusive = timestamp.toISOString(), from = new Date(timestamp.getTime() - 86_400_000).toISOString();
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(timestamp);
+    try {
+      // PostgreSQL stores microseconds; the application clock can still be at the profile's rounded millisecond.
+      const current = await s.monitoring.evaluateDrift(manager, s.d.id, { minSamples: 1 });
+      expect(current.observed_rows).toBe("3");
+      const repeated = await s.monitoring.evaluateDrift(manager, s.d.id, { from: current.window_start.toISOString(), to: current.window_end.toISOString(), minSamples: 1 });
+      expect(repeated.observed_rows).toBe("3"); expect(repeated.features).toEqual(current.features);
+      expect((await s.monitoring.monitor(manager, s.d.id, {})).versions[0]!.rows).toBe(3);
+      expect((await s.monitoring.evaluateDrift(manager, s.d.id, { from, to: exclusive })).observed_rows).toBe("0");
+    } finally { vi.useRealTimers(); }
+  }));
   it("measures drift against the training reference without storing raw inputs", () => withStore(async store => {
     const s = await served(store);
     // Training rows are x = 0..35 (the fixture's first 36 rows); observed traffic first matches them, then moves far away.
