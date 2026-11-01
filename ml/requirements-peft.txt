@@ -1,0 +1,5 @@
+# Optional local adapter training. Install the approved CPU torch wheel first for CPU-only use.
+-r requirements-transformers.txt
+peft==0.21.2
+accelerate==1.15.0
+psutil==7.2.2

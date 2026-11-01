@@ -1,0 +1,4 @@
+# Optional single-GPU CUDA 12.8 profile; install its approved torch wheel first.
+-r requirements-peft.txt
+torch==2.9.1+cu128
+bitsandbytes==0.50.2
