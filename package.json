@@ -9,6 +9,7 @@
     "ml/*.py",
     "ml/*.txt",
     "docs/ml.md",
+    "docs/ml-port-report.md",
     "docs/ml-backend-contract.md",
     "docs/ml-mlops.md",
     "README.md",

@@ -55,6 +55,7 @@ Meticule includes an optional, self-hosted ML platform for tabular, time-series,
 - versioned datasets and preprocessing pipelines;
 - durable training and evaluation with cross-validation;
 - benchmarks, bounded hyperparameter search and AutoML;
+- local Llama LoRA fine-tuning and optional single-GPU NF4/FP4 QLoRA, with adapter recovery and registered inference;
 - explicit model registration, promotion and rollback, and version-pinned inference;
 - tenant-isolated pgvector embedding indexes with exact similarity search;
 - MLOps: experiment tracking and lineage, MLflow export and import, Optuna studies, verified ONNX export and ONNX Runtime inference, registry policies with independent approval, deployments with validated revisions and rollback, drift monitoring with ground-truth feedback, and Matplotlib reports.

@@ -564,9 +564,9 @@ What the v1 contract already accommodates, what a new optional capability would 
 | Hugging Face-style models, XGBoost, LightGBM | A one-shot backend is supported as sklearn is. An iterative one is supported as the neural backends are. Their weights need the artifact format to be opaque bytes, which it already is. |
 | Richer MLOps, deployment targets, ONNX | Inference artifacts are opaque bytes behind a declared format, so an ONNX format is an additional format and runner. The inference lifecycle is outside the backend contract. |
 | Lineage, monitoring, promotion and rollback, advanced HPO | Outside the backend contract by design. The registry and experiments already own them. |
-| LoRA and PEFT, foundation-model fine-tuning | Needs a checkpoint that stores adapter weights and a base model reference. The checkpoint is opaque and the fingerprint covers the configuration, so this is an optional capability plus a new checkpoint format. No blocking assumption found. |
+| LoRA and PEFT | Implemented as an optional local `peft` backend under contract v2: `tokens`, `language_modeling`, `peft-lora-checkpoint-v1` and `meticule-lora-adapter-v1`. See section 20. Full foundation-model training is not included. |
 | Distributed and remote training | Blocking for the runner boundary. A runner is one local process with no shared state; a remote or distributed backend needs an execution transport and a lease model for its workers. This is a v2 concern. |
-| Model routing, distillation, reinforcement learning | Outside the single-attempt model. Routing belongs to the inference layer; distillation and RL need multi-attempt state the platform does not yet model. |
+| Model routing, distillation, reinforcement learning | Not selected for Public Core. Routing belongs to inference; distillation/RL need additional validated model/environment/dataset lifecycle contracts. Existing private implementations do not imply public support. |
 
 **What required contract v2:** non-tabular inputs, which v2 carries as typed cells in the same JSON rows (section 19). **What would
 still need a new version:** a remote or distributed execution transport; a training loop that is not expressed as epochs over rows.
@@ -873,3 +873,9 @@ M1 built the vocabulary only. Later milestones add the backends that use it; sec
 M1, no backend implemented a task other than classification and regression or took a non-tabular feature column, and no runner
 decoded media or computed the new metrics. `transcription` and its metrics were added in M8. No database migration was
 needed: the new snapshot fields and the embedding digest fit the existing JSON columns.
+
+## 20. Local adapter extension
+
+The optional peft backend declares one tokens input, language_modeling, no preprocessing, CPU/CUDA and fp32 adapter precision. NF4/FP4 changes base computation only and requires explicit CUDA. The existing prepare/train_chunk/export/evaluate/predict envelope and canonical epoch loop are unchanged. The runner emits token_cross_entropy, perplexity and next_token_accuracy; these metrics use the sequence itself as labels.
+
+The opaque peft-lora-checkpoint-v1 payload is bounded JSON metadata plus safetensors (no pickle), including adapter, optimizer, RNG, base/config/data identity and progress. The meticule-lora-adapter-v1 artifact pins its approved base and tokenizer; inference requires that base and a compatible runtime. Public PostgreSQL blob storage, tenant authorization and transactional lease fencing remain authoritative. Unsupported distillation/teacher/execution fields are refused, not silently ignored. See ml.md for exact bounds, defaults and unsupported combinations.

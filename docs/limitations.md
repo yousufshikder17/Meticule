@@ -1,5 +1,11 @@
 # Operational limitations
 
+- Phase 6 Public Core adds only bounded local Llama LoRA/QLoRA adapters. Approved base assets remain an inference
+  dependency; four-bit adapters require compatible CUDA. No teacher/student distillation, adapter merging, RL/DPO,
+  Ray execution or managed serving is included. Public retains its 16 MB PostgreSQL blob limit and existing
+  transactional publication guarantees. CUDA memory estimates are advisory; they are not a sandbox or a guarantee
+  against OOM. See [the supported contract](ml.md#phase-6-public-core-local-adapters).
+
 - The product surface is a minimal dependency-free UI, not a polished design system. It uses externally issued JWTs in session storage and does not implement signup, initial tenant bootstrap, login/password recovery, refresh, secure-cookie BFF, CSRF workflow, pagination controls, live updates, or browser automation. Connector and retrieval panels remain explicitly unavailable without their real backends.
 
 - Compose resource limits and CI are reference controls, not proof on every cloud/runtime. The pressure test verifies exclusion over 12 queued runs, not sustained throughput. There is no automated PITR drill, autoscaler, Kubernetes manifest, PgBouncer deployment, or zero-downtime schema compatibility analyzer.

@@ -1,4 +1,4 @@
-# Machine learning (V1 lifecycle, Phases 2 to 5)
+# Machine learning (V1 lifecycle, Phases 2 to 6 Public Core)
 
 Meticule's optional ML subsystem is a self-hosted machine-learning platform for tabular, time-series, text, image and audio data. You can:
 
@@ -9,6 +9,7 @@ Meticule's optional ML subsystem is a self-hosted machine-learning platform for 
 - build tenant-isolated pgvector embedding indexes and run exact similarity search;
 - run cross-validation, benchmarks, bounded hyperparameter search and AutoML;
 - resume interrupted neural training from durable checkpoints;
+- fine-tune bounded local Llama models with LoRA on CPU/CUDA or NF4/FP4 QLoRA on a single CUDA GPU;
 - register and promote model versions, and serve version-pinned inference;
 - track experiments and lineage, mirror runs to MLflow, tune with Optuna, export verified ONNX models, govern promotion with policies and independent approval, deploy with validated revisions and rollback, monitor drift and render Matplotlib reports.
 
@@ -310,7 +311,7 @@ Every Phase 4 backend runs on CPU in fp32 only.
 
 - **JAX.** Native JAX code (`jax.value_and_grad`, `jit`, explicit PRNG keys, hand-written SGD/Adam/AdamW), not a wrapper around another framework. It uses Phase 3's durable checkpointed training, early stopping and resume. Requesting `cuda` fails as `device_unavailable`.
 - **XGBoost and LightGBM.** Native training APIs, not scikit-learn wrappers. Each attempt trains once. Early stopping is the framework's own and is monitored only on the validation partition; Meticule's epoch-based training policy and checkpoints are refused. Each model is stored as the framework's JSON or text inside a JSON envelope, never a pickle.
-- **Transformers.** Six models serve pretrained classifiers, embedders and a greedy-CTC wav2vec2 speech recognizer. Two train a softmax head over a frozen encoder. There is no fine-tuning of the encoder, no PEFT/LoRA and no beam search or language model. A transcription request takes at most 8 clips of at most 30 s.
+- **Transformers.** Six models serve pretrained classifiers, embedders and a greedy-CTC wav2vec2 speech recognizer. Two train a softmax head over a frozen encoder. This Phase 4 backend does not fine-tune the encoder or implement beam search. Local causal-LM adapters use the separate optional `peft` backend described below. A transcription request takes at most 8 clips of at most 30 s.
 - **Audio.** MFCC summary vectors computed with NumPy and SciPy. `audio_features` serves them as embeddings; `audio_mfcc_classifier` trains a softmax head on them.
 - **Forecasting.** One univariate series per dataset: a timestamp feature and a numeric target, with no covariates. Forecasts are recursive multi-step over `horizon`, and evaluation is rolling-origin. Prediction rows are recent history and include the target; the response is `horizon` items of `{step, timestamp, value}`.
 - **Anomaly detection.** Unsupervised. Higher scores are more anomalous, and a numeric contamination (default 0.1) sets the threshold. A boolean label column is used only by score metrics, never for fitting.
@@ -380,7 +381,7 @@ Set the same variables for the API and the worker. Startup fails if `ML_TRANSFOR
 
 - CPU and fp32 only. No GPU path was added, and none is claimed.
 - Tests use tiny random Transformers models generated offline. They prove the execution path, not model quality. Accuracy of real BERT, ViT or wav2vec2 checkpoints is not measured.
-- There is no encoder fine-tuning, PEFT/LoRA, beam search, multivariate or covariate forecasting, or approximate vector index.
+- This Phase 4 backend has no encoder fine-tuning or beam search; the optional Phase 6 `peft` backend adds local causal-LM LoRA separately. Multivariate/covariate forecasting and approximate vector indexes remain unsupported.
 
 ## Public API
 
@@ -465,7 +466,7 @@ Real backend checks run when `ML_TEST_PYTHON` is set, and for the other backends
 Deferred:
 
 - further framework adapters, ONNX export beyond scikit-learn, and a plugin SDK;
-- encoder fine-tuning and PEFT/LoRA, multivariate forecasting, approximate vector indexes and model downloads;
+- encoder fine-tuning, multivariate forecasting, approximate vector indexes and automatic model downloads;
 - streaming or large artifacts beyond the 16 MB blob cap, and signed artifacts;
 - high-throughput serving, separate serving processes, traffic splitting and canary rollout, GPU execution for the Phase 4 backends, and GPU scheduling;
 - repeated CV, Bayesian or multi-stage AutoML, and Optuna pruning;
@@ -475,3 +476,127 @@ Deferred:
 A public plugin SDK for third-party backends is not offered; the backend contract is internal.
 
 Synchronous inference commits its outcome with the HTTP tenant transaction; terminated requests are not resumable inference jobs. Standalone callers can leave PENDING evidence after a crash. Successful training usage records measure wall time with zero token/cost counts; failed/recovered attempts remain in history, not estimated billing. Blob retention/GC and pagination remain deferred.
+
+## Phase 6 Public Core: local adapters
+
+This selective extension adds local PEFT training to the existing lifecycle. It preserves Public's authentication,
+`tenant_admin` mutation rules, tenant membership/RLS, canonical workers, transactional PostgreSQL blobs, registry,
+explicit READY promotion and synchronous inference. Training never automatically registers or deploys a model.
+There is no new scheduler, worker service, authorization policy or artifact store.
+
+| Capability | Public Core | Private distinction |
+| --- | --- | --- |
+| Existing datasets, preprocessing, experiments, checkpointed training, registry, inference and monitoring | Preserved | Broader operational integrations and orchestration |
+| Approved local Transformers workflows | Preserved | Broader fine-tuning workflows |
+| Local Llama LoRA fine-tuning | CPU or one CUDA device | Broader managed execution and model lifecycle |
+| NF4/FP4 QLoRA | Explicit single-CUDA-GPU configuration | Distributed execution and additional lifecycle integration |
+| Adapter recovery, integrity and registered inference | Supported locally | Managed serving and fleet operations |
+| Teacher/student distillation, including QLoRA students | Not included | Teacher-version resolution, lineage and student publication |
+| DQN/PPO and other RL; preference optimization | Not included | Integrated RL, model-based/multi-agent workflows and DPO |
+| Ray, managed inference, autoscaling, enterprise governance/risk/audit services | Not ported | Remain Private capabilities |
+
+Public already had its own basic registry approval, deployment records and tenant audit events before this extension;
+those interfaces remain unchanged. The matrix describes feature boundaries, not the removal of existing public features.
+Distillation requires a teacher-resolution and merged-student publication contract that this release does not introduce.
+DQN/PPO share the broader RL runtime; importing that catalog is outside this adapter-focused selection.
+
+### Installation and configuration
+
+Use an operator-approved Python environment with `ml/requirements-peft.txt`. For CPU, install the pinned CPU PyTorch
+wheel first. For the optional GPU profile, use `ml/requirements-qlora.txt` with the approved CUDA 12.8 PyTorch wheel.
+Installation is an explicit operator action; the platform never installs dependencies or downloads model assets.
+
+```powershell
+$env:ML_ENABLED='true'
+$env:ML_PEFT_ENABLED='true'
+$env:ML_PEFT_PYTHON='<absolute path to approved Python interpreter>'
+$env:ML_TIMEOUT_MS='180000'
+# Optional for operator-provisioned models; omitted for the built-in tiny model:
+$env:ML_TRANSFORMERS_MODEL_ROOT='<absolute directory of approved model manifests>'
+```
+
+Set the same configuration on API and ML workers. The normal dataset, pipeline, experiment and training-job APIs apply.
+The built-in `meticule-tiny-llama-v1` is a deterministic, locally generated test/development base, not pretrained weights.
+For useful provisioned weights, select `baseModel: "provisioned-llama"` and `pretrainedModel: "approved-name"`.
+Provisioned bases are operator-approved platform-wide assets, matching the existing Transformers boundary;
+this is not a tenant-uploaded model store. Training datasets, adapters and registry versions retain tenant ownership.
+The existing manifest command accepts `<model_dir> <kind> <family> <repository> <revision> [license]`;
+use `kind: causal-lm`, `family: llama`.
+Provision config, unsharded `model.safetensors` and `tokenizer.json` with matching SHA-256 manifest entries and provenance.
+Only validated Llama architecture/configurations, contiguous tokenizer IDs and safetensors weights are accepted.
+Every command loads a newly copied/hash-verified local asset set; model-supplied code, unsafe serialization,
+symlinks/junctions, arbitrary paths, URLs and automatic downloads are refused.
+
+The dataset has one non-null `tokens` feature, no separate target, no preprocessing and a random split. Cells contain
+integer token IDs separated by single spaces, for example `"0 1 2 3"`; provide IDs from the approved tokenizer.
+The public ingest grammar permits up to 512 IDs in a cell; this backend further requires **2–32 IDs per sequence**,
+within the selected model's vocabulary. At most 1,024 sequences, 500 optimizer steps and 256,000 training tokens
+are accepted. The provisioned base remains capped at **32 million parameters**, with conservative architecture,
+adapter/checkpoint and memory checks that can reject a configuration below that ceiling.
+
+Use `backend: "peft"`, `algorithm: "lora_causal_lm"`. Example training specification:
+
+```json
+{
+  "datasetVersionId": "<owned dataset version UUID>",
+  "featurePipelineId": "<owned pipeline UUID>",
+  "backend": "peft", "algorithm": "lora_causal_lm", "seed": 7,
+  "hyperparameters": {
+    "baseModel": "meticule-tiny-llama-v1", "rank": 4, "alpha": 8,
+    "targetModules": ["q_proj", "v_proj"], "dropout": 0,
+    "learningRate": 0.02, "batchSize": 8, "epochs": 6,
+    "maxSequenceLength": 32, "gradientAccumulationSteps": 1,
+    "quantization": "none", "computeDtype": "fp32", "doubleQuantization": false,
+    "maxMemoryMiB": 6144
+  },
+  "training": {"device": "cpu", "precision": "fp32", "checkpointEveryEpochs": 2, "earlyStopping": null},
+  "split": {"id": "<split UUID>", "strategy": "random", "train": 0.6, "validation": 0.2, "test": 0.2, "stratify": false},
+  "evaluation": {"metrics": ["token_cross_entropy", "perplexity", "next_token_accuracy"]}
+}
+```
+
+The catalog exposes all exact defaults/ranges. Defaults include batch size 16, ten epochs, rank 4, alpha 8,
+zero dropout, learning rate 0.02, sequence length 32, accumulation 1 and no quantization. Rank is 1–16,
+batch size 1–32, epochs 1–100, accumulation 1–32; targets are `q_proj`, `k_proj`, `v_proj`, `o_proj` only.
+QLoRA requires `training.device: "cuda"` plus explicit `quantization: "nf4"` or `"fp4"`; compute is `fp32` or
+native `bf16`, with optional double quantization. Training precision remains `fp32` for the adapter and optimizer.
+There is no silent CPU fallback. Compute/double-quantization settings without quantization are refused.
+CUDA admission checks estimated memory against the requested budget and available VRAM; estimates are advisory,
+not process isolation or a guarantee against OOM. Bound concurrency externally and leave host/driver headroom.
+
+### Training, recovery and inference
+
+The base is frozen and only allowlisted LoRA matrices receive AdamW updates. Next-token CE shifts logits/labels
+causally, ignores right padding and weights accumulated microbatches by valid target tokens, including partial groups.
+Evaluation reports token-weighted CE, its exponential perplexity and next-token accuracy on disjoint partitions.
+These small deterministic fixtures do not establish general language quality.
+
+`peft-lora-checkpoint-v1` stores safetensors plus bounded JSON: adapter/best weights, optimizer moments/steps,
+Python/NumPy/Torch/sampler/CUDA RNG state, progress and base/configuration/data fingerprints. Checkpoint boundaries
+are completed epoch/optimizer boundaries. Malformed, corrupt, foreign-base/dataset/configuration/device/runtime
+checkpoints are rejected; recovery never substitutes a base or silently starts over. Quantized recovery additionally
+validates quantization settings and pinned runtime metadata. Exact continuation is verified only within the tested
+same-device/runtime profile; it is not cross-device bitwise equivalence.
+
+Artifacts are `meticule-lora-adapter-v1`: adapter tensors and base/tokenizer/configuration/runtime provenance,
+without dense base weights. Register the successful attempt using the existing registry API, explicitly promote
+to READY and create a version-pinned endpoint. Inference needs the exact approved base and compatible runtime;
+quantized adapters need compatible CUDA. Missing/tampered assets fail with no prediction output; restoring an intact
+approved base permits serving again. Predictions are bounded lists of greedy next-token IDs at each input position,
+not an autoregressive chat/generation API. At most 64 rows per request are supported.
+
+Public keeps its existing 16 MB transactional blob bound; adapters and checkpoints have stricter internal bounds
+(1 MiB and 4 MiB respectively). Lease-fenced checkpoint/publication transactions remain authoritative.
+No filesystem hard-link/fsync protocol is transplanted into PostgreSQL storage. Process/lease recovery is tested;
+power-loss durability, backups and database availability depend on operator PostgreSQL configuration and operations.
+Adapter calls own temporary asset directories that are removed after normal completion or controlled interpreter
+termination. Abrupt Node/host death can still require operator cleanup of abandoned scratch directories; no global
+temporary-file sweep or filesystem crash-reconciliation service is included.
+
+Not supported: teacher/student distillation, Ray/distributed training, quantized teachers, adapter merging/dense
+export, arbitrary architectures/tokenizers, sharded models, full-base training, CPU four-bit fallback, general RL/DPO,
+managed serving or new enterprise governance. Requests carrying `distillation`, `teacher` or `execution` fail explicitly.
+Existing Phase 1–5 artifacts and APIs keep their contracts; no migration or retraining is required for those models.
+Restart API/workers with the same code/runtime configuration before enabling adapters.
+
+Reproducible verification and measured results are recorded in the [selective port report](ml-port-report.md).

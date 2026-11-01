@@ -20,3 +20,9 @@ Stages follow the active implementation order. A later stage begins only after i
 15. Product, API, and UI completion (implemented).
 
 The README and gate record, not this roadmap, state verified current implementation status.
+
+The optional ML extension preserves its Phase 1–5 lifecycle and adds the bounded Phase 6 Public Core
+adapter path: local LoRA and single-GPU NF4/FP4 QLoRA, safe checkpoints and version-pinned adapter inference.
+See [ML scope and limits](ml.md#phase-6-public-core-local-adapters) and the [verification report](ml-port-report.md).
+Distillation, RL/DPO, Ray orchestration and broader managed/enterprise ML capabilities are not included.
+This selection does not change the staged agent roadmap above.

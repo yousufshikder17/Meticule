@@ -1,5 +1,11 @@
 # Configuration
 
+Optional adapter training uses `ML_ENABLED=true`, `ML_PEFT_ENABLED=true` and `ML_PEFT_PYTHON` pointing
+to the interpreter with `ml/requirements-peft.txt` installed. The built-in deterministic tiny Llama needs
+no model files; operator-provisioned Llama models use `ML_TRANSFORMERS_MODEL_ROOT`. QLoRA additionally
+requires the approved CUDA runtime in `ml/requirements-qlora.txt` and an explicit CUDA training request.
+See [local adapters](ml.md#phase-6-public-core-local-adapters) for bounds and inference dependencies.
+
 Node.js 24 LTS is the supported host runtime. `DATABASE_URL` is required. API, worker, and migrations use it directly and never infer a Docker hostname.
 
 Core settings: `PORT`, `WORKER_ID`, `LEASE_SECONDS`, `WORKER_POLL_MS`, and comma-separated `WORKER_ROLES`.

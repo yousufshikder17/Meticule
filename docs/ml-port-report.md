@@ -560,3 +560,223 @@ The Phase 5 selective port is complete. Every implemented private Phase 5 capabi
 - with public JWT membership, `tenant_admin` writes and RLS.
 
 The private audit corrections are included, and the public review's confirmed findings are fixed. Earlier behavior is preserved, and the fresh and populated-upgrade migration paths pass. The full sequential regression passed with no failures and no skips.
+
+## Selective Phase 6 Public Core port
+
+This is an adapter-focused selection, not a repository synchronization. Starting Public branch: `main`,
+commit `f8d1edb5b8d21e020ef3fe723a86c0657eff3650`. The source repository remained read-only. Existing Phase 1–5 implementations were inspected before
+editing: Public already had datasets/preprocessing, nine backend IDs, durable neural training, experiments,
+registry/serving, monitoring and its own MLOps/authorization architecture. These were preserved.
+
+The [public/private capability matrix](ml.md#phase-6-public-core-local-adapters) records the selected boundary.
+Added: local Llama LoRA and optional single-GPU NF4/FP4 QLoRA, safe adapter/checkpoint formats, approved local model
+provisioning and registered adapter inference. Distillation/QLoRA distillation, merged exports, RL/DPO and Ray remain
+Private. Distillation would require additional teacher-version and merged-publication lifecycle contracts; DQN/PPO
+share a broader RL runtime that was not selected. These are deliberate product-scope decisions, not claims that the
+algorithms are impossible to run locally. No private policy, governance, distributed transport or migration was copied.
+
+### Adaptation and compatibility
+
+- Reused Public's `NeuralRunnerBackend`, task/catalog validation, epoch loop, worker leases, cancellation, registry,
+  explicit READY promotion, inference, monitoring and tenant-scoped transactional PostgreSQL blob store.
+- Extended contract v2 with `tokens`, `language_modeling` and token CE/perplexity/accuracy; older vocabulary and
+  artifact contracts remain valid. No schema migration was needed; all 16 existing migrations applied to a new
+  disposable local PostgreSQL/pgvector database.
+- Extracted the narrow shared LoRA/quantization/provisioning primitives and adapter-only runner. Distillation,
+  merging and Ray code are absent. Quantized checkpoint restoration includes the current runtime/configuration
+  compatibility checks. Numeric accumulation and RNG validation audit corrections are included.
+- Kept the existing manifest/copy/hash boundary; only safe local Llama safetensors assets and matching tokenizers
+  are loaded. No model-supplied Python, unsafe pickle ingestion, arbitrary imports or network/model downloads.
+- Added an opt-in `ML_PEFT_ENABLED` / `ML_PEFT_PYTHON` configuration and separate pinned optional Python requirements.
+  JavaScript dependencies and lockfile are unchanged. API/workers still start without Python when ML is disabled.
+- Added a parent-death guard for the adapter interpreter, including Windows venv launchers. Real cancellation and
+  environment-secret isolation tests pass. Public storage remains transactional blobs, not a copied filesystem store.
+
+### Fresh numerical evidence
+
+The fresh pre-edit baseline passed production compilation and reported 22 full-project TypeScript diagnostics.
+Three targeted baseline unit files passed 23 cases; six real-Python wrappers were skipped because their interpreter
+variables were unset in that initial command. They run in the final enabled-runtime unit sweep below. Historical
+Phase 5 results above are preserved and are not counted as fresh Phase 6 verification.
+
+Tests generate small models and counting-token datasets locally; no private dataset or historical private result
+is published as Public evidence. CPU uses Python 3.13.12, Torch 2.9.1+cpu, Transformers 5.17.0, PEFT 0.21.2,
+Accelerate 1.15.0 and Safetensors 0.8.0. CUDA uses Torch 2.9.1+cu128 / CUDA 12.8 and bitsandbytes 0.50.2 on an
+RTX 4060 Laptop GPU with 8,188 MiB VRAM. These are bounded tiny-model measurements, not large-model validation.
+
+| Check | Actual result |
+| --- | --- |
+| CPU LoRA foundation | 27 named checks pass; frozen base 21,664 parameters, trainable adapter 1,024, total 22,688 |
+| CPU runner / fresh-process continuation | 28 checks pass; adapter and optimizer maximum difference 0; dropout/sampler RNG restored |
+| Accumulation and checkpoint RNG audit | 20 checks pass, including unequal token counts and partial accumulation groups |
+| Provisioned model/tokenizer and hostile assets | 23 checks pass, including real training, recovery and inference |
+| Quantization matrix | 56 checks pass: 16 explicitly injected validation checks and 40 real GPU checks across all eight configurations |
+| CUDA checkpoint continuation/inference/refusals | Eight checks pass, including exact full-state continuation, incompatible quantization-runtime rejection and corrupt checkpoint rejection |
+
+The direct CPU foundation trained 200 optimizer steps: CE **4.27402735 → 0.06221641**; all eight adapter tensors
+changed, base weights remained unchanged and no frozen tensor had a gradient. Separate-process adapter inference
+matches within `1e-6`. The six-epoch runner fixture achieved validation CE **0.60538**, perplexity **1.83194**,
+accuracy **0.89855**, and held-out test CE **0.57336**, perplexity **1.77422**, accuracy **0.91860**. Discarding AdamW
+moments or dropout RNG changed the continuation, so recovery is tested beyond successful process exit.
+
+The bounded NF4/bf16/double-quantized recovery fixture trained four optimizer steps over two epochs: training CE
+**3.84538124 → 1.87532334**. Uninterrupted/resumed adapter, optimizer and RNG tensors were identical; export and
+inference passed. Eight-configuration peak Torch allocation was **67,745,280 bytes (64.61 MiB)**, excluding
+CUDA context/driver memory and other processes. This does not establish concurrent capacity or full-ceiling model fit.
+Quantization leaves the mathematical CE objective unchanged; there is no teacher or distillation claim.
+
+### Lifecycle verification record
+
+The first six-case PostgreSQL/blob integration run had two passes and four failures. The interruption fixture
+incorrectly drained subsequent worker ticks, allowing automatic recovery before inspecting the abandoned state.
+The production worker behaved correctly. The helper now executes one tick at the injected lease-loss boundary;
+all intended checkpoint/publication assertions remain. A targeted four-case rerun passed CPU, FP4 and corrupt
+checkpoint handling; NF4's exact artifact hash and all metric values matched, but a test incorrectly compared
+unordered SQL row positions. Metrics are now compared by partition/name with exact values, without changing a
+numerical tolerance or learning threshold. Original failed reports are retained.
+
+Cancellation and provisioned-base dependency passed in the initial run: hiding the approved base produces FAILED
+with no output; restoring it serves again. The passing CPU/FP4 recovery cases additionally verify actual learning,
+committed checkpoints, lease replacement, no stale checkpoint publication, immutable adapter identity, explicit
+registration/promotion, independent endpoint inference, role refusals, cross-tenant registry/artifact/inference
+isolation and tampered-artifact rejection. The final NF4 case passed in 320.89 seconds with exact artifact/value
+equality and registered inference. Across these reports, all six original lifecycle cases now have passing evidence.
+The first rerun selected four cases (three passed, one failed, two filtered); the final rerun selected NF4 only
+(one passed, five filtered). These filtered cases are not missing hardware/prerequisite skips or additional passes;
+their passing evidence is in the earlier reports.
+
+The first complete unit run exercised all installed optional interpreters: **234 passed, one failed, zero skipped**
+across 53 files (492.35 seconds). The failure was the older exhaustive Python metric-reference table, which still
+listed only the pre-token metrics. It now includes the three declared language-model metrics and their label-free
+semantics while retaining every original Phase 3/4 assertion. The corrected four-file targeted run passed all
+16 cases. The initial failed unit report is retained.
+
+A controlled subprocess regression then reproduced a cleanup defect: after the guarded interpreter was cancelled,
+its temporary fixture asset remained. Adapter calls now receive an owned per-call temporary directory, and Node
+waits for the aborted interpreter's pipes to close before removing it. The same regression passes, verifies the
+actual interpreter PID is gone and its scratch directory is absent, and retains the original failing report.
+This narrow runner option is opt-in for adapters; existing backend behavior and storage contracts are unchanged.
+The two short real CPU/CUDA training-and-registered-inference cases passed (70.86 and 115.35 seconds) and left
+no new per-call scratch directories. The fresh final complete unit run then passed **235 tests across 53 files,
+zero failures and zero skips**, in 474.72 seconds. All available optional interpreter/CI assertions were enabled.
+The selected regression batch exercised 173 cases across 28 files: **172 passed, one failed, zero skipped**
+(1,626.92 seconds). Its monitoring test observed 108 rows after four completed 36-row batches instead of 144.
+The existing service used an application-clock millisecond upper bound against PostgreSQL microsecond timestamps,
+which could omit the latest completed batch. A real-PostgreSQL regression explicitly injected an application clock
+rounded to an already stored profile timestamp: the old implementation counted zero of three completed rows.
+Default windows now use the database clock, rounded up to a millisecond exclusive bound that the API can replay.
+Explicit caller windows retain their half-open semantics. No drift threshold, expected row count or traffic fixture
+was relaxed. The complete monitoring file, public MLOps authorization file and drift unit file passed **nine of nine**
+after correction; this includes the original 144-row assertion and the new clock/replay/exclusive-bound case.
+The original broad failure and controlled failing reproduction are retained.
+
+Consequently **174 unique regression cases have passing evidence**: **163 PostgreSQL integration cases across
+27 files plus 11 cross-backend conformance cases**. That is the original 173 cases plus one new clock regression,
+not 172+9 independent passes. The corrective nine-case run also repeats four already counted unit cases.
+This is selected integration coverage, not the entire historical Public integration/per-backend conformance matrix.
+
+The additional approved provisioned-model CUDA check passed in 134.35 seconds: actual NF4/fp32 training,
+approved model/tokenizer provenance, explicit READY registration, independent inference and scratch cleanup.
+Training CE was **4.08427683 → 1.72982484**. A read-only PostgreSQL proof confirms `device_actual: cuda`,
+`quantization: nf4`, `base_model: provisioned-llama`, `base_model_name: approved-llama`, adapter format,
+READY version and successful prediction with output. The final CPU isolated-serving case passed again in
+61.81 seconds. All **eight current adapter lifecycle cases** have passing evidence across the focused reports;
+filtered rerun cases remain labelled as filtered, not as passed or unavailable hardware.
+
+The CPU quantization-refusal entry point also passed all 16 checks without requesting GPU training. The existing
+16 migrations reran idempotently over the populated disposable test database and readiness passed afterward.
+No production database, existing evidence database, external service or provisioned customer model was used.
+`.tmp/phase6-port/evidence.json` maps the actual reports and separates repeated checks from unique coverage.
+
+Production compilation passes; the full-project compiler still reports exactly the original 22 test-file
+diagnostics, with byte-identical output. A new test-only nullability diagnostic was corrected; no unrelated baseline
+diagnostics were fixed. The offline package dry-run contains **216 files**, including all seven added ML
+runtime/requirements files, both compiled adapter modules and this existing public verification report, with no
+tests, caches, model weights, environment files, private checkout paths or private runtime modules. The CI YAML
+parses with a new separate CPU `peft` job; hosted CI and Linux execution have not run from this workstation.
+
+### Commands and evidence
+
+Actual local orchestration commands (ignored helpers hold installed interpreter paths, disposable database selection,
+stdout/stderr and JSON reports; they are not runtime/package dependencies):
+
+```powershell
+rtk proxy node .tmp/phase6-port/setup.mjs
+rtk proxy node .tmp/phase6-port/database.mjs
+rtk proxy node .tmp/phase6-port/numerical.mjs cpu
+rtk proxy node .tmp/phase6-port/numerical.mjs cuda
+rtk proxy node .tmp/phase6-port/recovery.mjs
+rtk proxy node .tmp/phase6-port/run.mjs peft-integration tests/integration/ml-peft.test.ts
+rtk proxy node .tmp/phase6-port/finish-verification.mjs
+rtk proxy node .tmp/phase6-port/run.mjs temp-cleanup-red tests/unit/ml-peft-cancellation.test.ts
+rtk proxy node .tmp/phase6-port/run.mjs temp-cleanup-green tests/unit/ml-peft-cancellation.test.ts tests/unit/ml-runner-protocol.test.ts tests/unit/ml-runner-environment.test.ts tests/unit/ml-python-runtime.test.ts
+rtk proxy node .tmp/phase6-port/finish-verification.mjs --final
+rtk proxy node .tmp/phase6-port/run.mjs monitoring-clock-red tests/integration/ml-monitoring.test.ts --testNamePattern="uses database time"
+rtk proxy node .tmp/phase6-port/run.mjs monitoring-clock-green tests/integration/ml-monitoring.test.ts tests/integration/ml-mlops-auth.test.ts tests/unit/ml-drift.test.ts
+rtk proxy node .tmp/phase6-port/run.mjs peft-provisioned-gpu tests/integration/ml-peft.test.ts --testNamePattern="CUDA NF4: real isolated scratch"
+rtk proxy node .tmp/phase6-port/run.mjs peft-final-cpu tests/integration/ml-peft.test.ts --testNamePattern="CPU: real isolated scratch"
+rtk proxy node .tmp/phase6-port/finalize.mjs
+rtk proxy node .tmp/phase6-port/evidence.mjs
+rtk proxy node .tmp/phase6-port/audit.mjs
+rtk proxy node .tmp/phase6-port/package.mjs
+```
+
+To reproduce without those local helpers, set `DATABASE_URL` and `TEST_DATABASE_URL` to a disposable database,
+apply the repository migrations, and set `ML_TEST_PEFT_PYTHON` / `ML_TEST_QLORA_PYTHON` to approved CPU/CUDA
+interpreters. Run the tracked entry points directly:
+
+```powershell
+node node_modules/vitest/vitest.mjs run tests/unit/ml-peft.test.ts tests/unit/ml-tokens.test.ts tests/unit/ml-peft-cancellation.test.ts tests/unit/ml-peft-numerical.test.ts tests/integration/ml-peft.test.ts
+& $env:ML_TEST_QLORA_PYTHON -B tests/python/check_qlora.py --gpu --matrix
+& $env:ML_TEST_QLORA_PYTHON -B tests/python/check_qlora_runner.py
+node node_modules/typescript/bin/tsc -p tsconfig.build.json
+node node_modules/typescript/bin/tsc --noEmit
+npm pack --dry-run --ignore-scripts --offline
+```
+
+Without the optional CUDA interpreter, GPU integration cases are explicitly skipped. The CPU CI job does not
+claim GPU coverage. Full optional unit coverage also requires the existing `ML_TEST_*_PYTHON` variables and matching
+`ML_*_JOB=true` CI assertions described in `docs/ml.md`; install nothing automatically. Use sequential test files on
+memory-constrained hosts. Remote/multi-node, other operating systems, large pretrained models, production load,
+power-loss/PITR durability and new private algorithms are outside this verification. Per-call scratch cleanup covers
+normal completion and controlled interpreter termination while its Node owner remains alive. An abrupt host or Node
+process death can leave an abandoned temporary directory; operator cleanup/reconciliation is not an automated Public
+feature. No unrelated or historical temporary directories were swept.
+
+### Changed files and local commits
+
+The selection changes 48 unique files. No migrations, JavaScript dependencies or lockfile entries were added.
+The optional Python additions are PEFT 0.21.2, Accelerate 1.15.0, psutil 7.2.2 and, for CUDA only,
+bitsandbytes 0.50.2, reusing the existing pinned Transformers/PyTorch stack. These versions were already installed
+for local verification; nothing was downloaded. `package.json` adds the public verification report to its file whitelist.
+
+| Area | Files (relative to repository root) |
+| --- | --- |
+| Configuration/package/CI | `.env.example`, `package.json`, `.github/workflows/ci.yml` |
+| Python runtime (`ml/`) | `lora_backend.py`, `lora_finetune.py`, `lora_provisioning.py`, `lora_quantization.py`, `ml_runtime_common.py`, `requirements-peft.txt`, `requirements-qlora.txt`, `runner_parent_guard.py`, `transformers_manifest.py` |
+| Services/contracts (`src/ml/`) | `configuration.ts`, `contract.ts`, `domain.ts`, `metrics.ts`, `model-catalog.ts`, `monitoring.ts`, `neural-backend.ts`, `peft-backend.ts`, `peft-models.ts`, `runner-backend.ts`, `runner-process.ts`, `tasks.ts` |
+| Integration tests (`tests/integration/`) | `ml-monitoring.test.ts`, `ml-peft.test.ts` |
+| Python checks (`tests/python/`) | `check_lora.py`, `check_lora_audit.py`, `check_lora_backend.py`, `check_metrics.py`, `check_provisioned_lora.py`, `check_qlora.py`, `check_qlora_runner.py`, `lora_provisioning_fixtures.py` |
+| Unit tests (`tests/unit/`) | `ml-catalog.test.ts`, `ml-domain.test.ts`, `ml-peft-cancellation.test.ts`, `ml-peft-numerical.test.ts`, `ml-peft.test.ts`, `ml-tasks.test.ts`, `ml-tokens.test.ts` |
+| Documentation | `README.md`, `docs/configuration.md`, `docs/limitations.md`, `docs/ml-backend-contract.md`, `docs/ml-port-report.md`, `docs/ml.md`, `docs/roadmap.md` |
+
+| Local commit | Files | Verified workstream |
+| --- | ---: | --- |
+| `92043ed` | 10 | Token/language-model contracts and backward-compatible defaults |
+| `11ef43c` | 8 | Safe local LoRA and optional four-bit primitives |
+| `dabe76d` | 14 | Public training/checkpoint/registry/inference adapter integration |
+| `dd3cf15` | 1 | Exhaustive metric-reference fixture extended for token losses |
+| `0100fe5` | 5 | Reproduced interpreter scratch-cleanup correction |
+| `0293339` | 2 | Reproduced monitoring clock/window correction |
+| `f7b6651` | 3 | Real adapter lifecycle tests and bounded CPU CI |
+
+The companion documentation/package commit follows these verified workstreams; its hash and final working-tree
+status are recorded in the completion response and Git history. Every commit stays below the 20-file limit.
+The canonical agent roadmap is unchanged apart from a bounded ML capability note. The source repository remains
+unchanged; no push, publication, production deployment or production database mutation occurred.
+
+**Final status: COMPLETE for the selected local Public Core adapter release.** Real CPU/CUDA optimization,
+frozen-base/trainable-adapter boundaries, recovery, immutable registration, independent inference, negative validation,
+tenant isolation, relevant regressions, compilation and package integrity are verified. Distillation, RL/DPO, Ray,
+merged artifacts and managed/enterprise capabilities were intentionally not ported. This is not full-platform,
+hosted-CI, cross-platform, large-model or production-readiness certification.
