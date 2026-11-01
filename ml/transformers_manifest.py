@@ -27,7 +27,7 @@ ALLOWED_FILES = frozenset({"config.json", "model.safetensors", "tokenizer.json",
                            "merges.txt", "special_tokens_map.json", "added_tokens.json", "preprocessor_config.json",
                            # transformers v5 saves a Wav2Vec2Processor (feature extractor + CTC tokenizer) as processor_config.json.
                            "processor_config.json"})
-KINDS = frozenset({"text-encoder", "text-classifier", "image-encoder", "image-classifier", "audio-classifier", "speech-ctc"})
+KINDS = frozenset({"text-encoder", "text-classifier", "image-encoder", "image-classifier", "audio-classifier", "speech-ctc", "causal-lm"})
 MAX_FILES = 64
 MAX_TOTAL_BYTES = 2 * 1024 ** 3
 MAX_JSON_BYTES = 16 * 1024 * 1024

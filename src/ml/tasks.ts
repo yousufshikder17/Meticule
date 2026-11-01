@@ -9,7 +9,7 @@ import type { ModelDefinition } from "./model-catalog.js";
  * The task registry (spec sec. 4): the single source of what a task means. Backends declare tasks, the catalog assigns one
  * per model, and validation, prediction and metrics read the rules here, never a backend or model name.
  */
-export const TASK_TYPES = ["classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription"] as const;
+export const TASK_TYPES = ["classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription", "language_modeling"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
 export interface TaskDefinition {
@@ -42,6 +42,7 @@ export const TASKS: Readonly<Record<TaskType, TaskDefinition>> = {
   anomaly_detection: { target: "optional", targetTypes: ["boolean"], splits: both, crossValidation: false, predictionIncludesTarget: false, outputs: "row", output: z.strictObject({ score: z.number().finite(), anomaly: z.boolean() }), maxPredictionRows: 1000 },
   embedding: { target: "optional", targetTypes: ["number", "string", "boolean"], splits: both, crossValidation: false, predictionIncludesTarget: false, outputs: "row", output: z.array(z.number().finite()).min(1).max(4096), maxPredictionRows: 256 },
   // Speech to text: the target is the reference transcript (non-nullable text); one transcript per clip.
+  language_modeling: { target: "optional", targetTypes: [], splits: ["random"], crossValidation: false, predictionIncludesTarget: false, outputs: "row", output: z.array(z.int().min(0).max(999_999)).min(1).max(512), maxPredictionRows: 64 },
   transcription: { target: "required", targetTypes: ["text"], splits: ["random"], crossValidation: false, predictionIncludesTarget: false, outputs: "row", output: z.string().max(MAX_TEXT_CHARS), maxPredictionRows: 8 },
 };
 

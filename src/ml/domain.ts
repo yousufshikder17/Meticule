@@ -10,7 +10,7 @@ const Identity = z.object({ id: Id, tenantId: Id, createdAt: z.iso.datetime() })
 // Phase 1-3 datasets use only the tabular types. text, timestamp, image and audio cells are strings with their own rules
 // (validateRows, media.ts), and any of them makes a snapshot need contract v2.
 export const TABULAR_COLUMN_TYPES = ["number", "string", "boolean"] as const;
-export const COLUMN_TYPES = [...TABULAR_COLUMN_TYPES, "text", "timestamp", "image", "audio"] as const;
+export const COLUMN_TYPES = [...TABULAR_COLUMN_TYPES, "text", "timestamp", "image", "audio", "tokens"] as const;
 export type ColumnType = (typeof COLUMN_TYPES)[number];
 export const isTabularType = (type: string): boolean => (TABULAR_COLUMN_TYPES as readonly string[]).includes(type);
 const TARGET_TYPES: readonly ColumnType[] = ["number", "string", "boolean", "text"];
@@ -111,8 +111,9 @@ export function cohortKey(raw: unknown, indices: unknown): string {
 }
 
 // The JSON type of each column type's cells.
-const CELL_TYPES: Record<ColumnType, "number" | "string" | "boolean"> = { number: "number", string: "string", boolean: "boolean", text: "string", timestamp: "string", image: "string", audio: "string" };
+const CELL_TYPES: Record<ColumnType, "number" | "string" | "boolean"> = { number: "number", string: "string", boolean: "boolean", text: "string", timestamp: "string", image: "string", audio: "string", tokens: "string" };
 export const MAX_TEXT_CHARS = 10_000;
+export const TOKENS_CELL = /^(0|[1-9][0-9]{0,5})( (0|[1-9][0-9]{0,5})){0,511}$/;
 const TextCell = z.string().max(MAX_TEXT_CHARS);
 
 /**
@@ -136,6 +137,7 @@ export function validateRows(schema: DatasetSchemaType, raw: unknown, prediction
       const v = row[c.name];
       if (v === undefined || (v === null ? (!c.nullable || c.name === schema.target) : typeof v !== CELL_TYPES[c.type])) throw new ConflictError(`Row ${index}: invalid ${c.name}`);
       if (typeof v !== "string") continue;
+      if (c.type === "tokens" && (!TOKENS_CELL.test(v) || v.includes("\n") || v.includes("\r"))) throw new ConflictError(`Row ${index}: invalid token sequence`);
       if (c.type === "timestamp" && timestampMs(v) === undefined) throw new ConflictError(`Row ${index}: invalid ${c.name}: use ISO-8601 with an explicit zone`);
       if (c.type !== "image" && c.type !== "audio") continue;
       try {

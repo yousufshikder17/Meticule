@@ -88,10 +88,10 @@ describe("model catalog", () => {
   });
   it("registers every Phase 4 metric with its tasks, label need and diagnostics, and defaults per task and labelling", () => {
     expect(Object.keys(METRICS).sort()).toEqual(["accuracy", "anomaly_f1", "anomaly_precision", "anomaly_recall", "average_precision", "f1", "log_loss", "mae", "mase", "mean_pairwise_cosine", "mse", "precision", "r2",
-      "recall", "retrieval_mrr", "retrieval_precision_at_1", "rmse", "roc_auc", "smape", "threshold_calibration_error", "wer", "cer"].sort());
+      "recall", "retrieval_mrr", "retrieval_precision_at_1", "rmse", "roc_auc", "smape", "threshold_calibration_error", "wer", "cer", "token_cross_entropy", "perplexity", "next_token_accuracy"].sort());
     expect(METRICS.roc_auc).toEqual({ tasks: ["classification", "anomaly_detection"], direction: "higher", needs: "scores", labels: true });
     expect(METRICS.mae.tasks).toEqual(["regression", "forecasting"]);
-    expect((Object.keys(METRICS) as MetricName[]).filter(n => !METRICS[n].labels)).toEqual(["threshold_calibration_error", "mean_pairwise_cosine"]);
+    expect((Object.keys(METRICS) as MetricName[]).filter(n => !METRICS[n].labels)).toEqual(["threshold_calibration_error", "mean_pairwise_cosine", "token_cross_entropy", "perplexity", "next_token_accuracy"]);
     expect((Object.keys(METRICS) as MetricName[]).filter(n => METRICS[n].diagnostic)).toEqual(["threshold_calibration_error", "mean_pairwise_cosine"]);
     expect(DEFAULT_METRICS).toEqual({ classification: ["accuracy"], regression: ["mae", "mse"] });
     expect(defaultMetrics("forecasting", true)).toEqual(["mae", "rmse"]);

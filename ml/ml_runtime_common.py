@@ -58,7 +58,10 @@ METRICS = {
     "wer": (("transcription",), "lower", True, False),
     "cer": (("transcription",), "lower", True, False),
 }
-TASKS = ("classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription")
+METRICS.update({"token_cross_entropy": (("language_modeling",), "lower", False, False),
+                "perplexity": (("language_modeling",), "lower", False, False),
+                "next_token_accuracy": (("language_modeling",), "higher", False, False)})
+TASKS = ("classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription", "language_modeling")
 DIRECTIONS = {name: metric[1] for name, metric in METRICS.items()}
 TASK_METRICS = {task: tuple(name for name, metric in METRICS.items() if task in metric[0]) for task in TASKS}
 LABEL_FREE = frozenset(name for name, metric in METRICS.items() if not metric[2])
@@ -68,7 +71,8 @@ DEFAULTS = {"classification": (("accuracy",), None), "regression": (("mae", "mse
             "forecasting": (("mae", "rmse"), None),
             "anomaly_detection": (("average_precision",), ("threshold_calibration_error",)),
             "embedding": (("retrieval_precision_at_1",), ("mean_pairwise_cosine",)),
-            "transcription": (("wer", "cer"), None)}
+            "transcription": (("wer", "cer"), None),
+            "language_modeling": (("token_cross_entropy", "perplexity"), ("token_cross_entropy", "perplexity"))}
 
 
 class IncompatibleArtifact(ValueError):

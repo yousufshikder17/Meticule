@@ -17,7 +17,7 @@ const snapshotOf = (row: TableRow) => snapshotFor({
 
 describe("task registry", () => {
   it("defines the Phase 4 tasks and the rules each one imposes (spec sec. 4)", () => {
-    expect(TASK_TYPES).toEqual(["classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription"]);
+    expect(TASK_TYPES).toEqual(["classification", "regression", "forecasting", "anomaly_detection", "embedding", "transcription", "language_modeling"]);
     const rules = Object.fromEntries(TASK_TYPES.map(task => { const { output: _, ...rest } = TASKS[task]; return [task, rest]; }));
     const both = ["random", "chronological"];
     expect(rules).toEqual({
@@ -27,17 +27,20 @@ describe("task registry", () => {
       anomaly_detection: { target: "optional", targetTypes: ["boolean"], splits: both, crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 1000 },
       embedding: { target: "optional", targetTypes: ["number", "string", "boolean"], splits: both, crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 256 },
       transcription: { target: "required", targetTypes: ["text"], splits: ["random"], crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 8 },
+      language_modeling: { target: "optional", targetTypes: [], splits: ["random"], crossValidation: false, predictionIncludesTarget: false, outputs: "row", maxPredictionRows: 64 },
     });
   });
 
   it("validates one prediction with the task's output schema", () => {
     const step = { step: 1, timestamp: "2024-03-01T00:00:00+01:00", value: 2.5 };
     const accepted: Record<TaskType, unknown[]> = {
+      language_modeling: [[0], [1, 2, 3]],
       classification: ["spam", 3, false, "x".repeat(10_000)], regression: [0, -1.5, 1e300],
       forecasting: [step, { ...step, step: 100 }], anomaly_detection: [{ score: -0.2, anomaly: false }, { score: 3, anomaly: true }],
       embedding: [[0.25], [0, -1, 2], new Array(4096).fill(0.5)], transcription: ["", "hello world", "x".repeat(10_000)],
     };
     const refused: Record<TaskType, unknown[]> = {
+      language_modeling: [[], [-1], [1.5], ["1"], 1],
       classification: [null, {}, [], Number.NaN, Number.POSITIVE_INFINITY, "x".repeat(10_001)],
       regression: ["1", true, null, Number.NaN, Number.NEGATIVE_INFINITY],
       forecasting: [{ ...step, step: 0 }, { ...step, step: 1.5 }, { ...step, timestamp: "2024-03-01T00:00:00" }, { ...step, timestamp: "2024-02-30T00:00:00Z" }, { ...step, value: Number.NaN }, { ...step, extra: 1 }, { step: 1, value: 1 }],

@@ -20,7 +20,7 @@ describe("ML domain", () => {
   });
   it("declares the Phase 4 column types and an optional target that must be a number, string, boolean or text column", () => {
     expect(TABULAR_COLUMN_TYPES).toEqual(["number", "string", "boolean"]);
-    expect(COLUMN_TYPES).toEqual(["number", "string", "boolean", "text", "timestamp", "image", "audio"]);
+    expect(COLUMN_TYPES).toEqual(["number", "string", "boolean", "text", "timestamp", "image", "audio", "tokens"]);
     const corpus = DatasetSchema.parse({ id, columns: [{ name: "passage", type: "text" }] });
     expect(corpus).toEqual({ id, columns: [{ name: "passage", type: "text", nullable: false }] });
     for (const type of ["number", "string", "boolean", "text"]) expect(DatasetSchema.safeParse({ id, columns: [{ name: "a", type: "number" }, { name: "t", type }], target: "t" }).success, type).toBe(true);

@@ -19,6 +19,9 @@ export interface NeuralRunnerOptions {
   python: string;
   script: string;
   timeoutMs: number;
+  tasks?: BackendCapabilities["tasks"];
+  inputs?: BackendCapabilities["inputs"];
+  preprocessing?: BackendCapabilities["preprocessing"];
 }
 
 /**
@@ -36,10 +39,10 @@ export class NeuralRunnerBackend extends RunnerBackend {
       checkpointFormats: [options.checkpointFormat],
       devices: options.devices,
       precisions: options.mixedPrecision ? ["fp32", "mixed"] : ["fp32"],
-      preprocessing: NEURAL_OPERATIONS,
+      preprocessing: options.preprocessing ?? NEURAL_OPERATIONS,
       iterative: true,
-      tasks: ["classification", "regression"],
-      inputs: TABULAR_COLUMN_TYPES,
+      tasks: options.tasks ?? ["classification", "regression"],
+      inputs: options.inputs ?? TABULAR_COLUMN_TYPES,
     };
     super({ id: options.id, capabilities, python: options.python, script: options.script, timeoutMs: options.timeoutMs });
     this.checkpointFormat = options.checkpointFormat;

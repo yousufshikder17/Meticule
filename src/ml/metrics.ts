@@ -37,6 +37,9 @@ const definitions = {
   mean_pairwise_cosine: { tasks: ["embedding"], direction: "lower", labels: false, diagnostic: true }, // anisotropy
   // Corpus-level: summed edits over summed reference length, on lower-cased whitespace-collapsed text; refused when empty.
   wer: { tasks: ["transcription"], direction: "lower", labels: true },
+  token_cross_entropy: { tasks: ["language_modeling"], direction: "lower", labels: false },
+  perplexity: { tasks: ["language_modeling"], direction: "lower", labels: false },
+  next_token_accuracy: { tasks: ["language_modeling"], direction: "higher", labels: false },
   cer: { tasks: ["transcription"], direction: "lower", labels: true },
 } as const satisfies Record<string, MetricDefinition>;
 export type MetricName = keyof typeof definitions;
@@ -50,6 +53,7 @@ const DEFAULTS: Readonly<Record<TaskType, { labelled: readonly MetricName[]; unl
   forecasting: { labelled: ["mae", "rmse"], unlabelled: null },
   anomaly_detection: { labelled: ["average_precision"], unlabelled: ["threshold_calibration_error"] },
   embedding: { labelled: ["retrieval_precision_at_1"], unlabelled: ["mean_pairwise_cosine"] },
+  language_modeling: { labelled: ["token_cross_entropy", "perplexity"], unlabelled: ["token_cross_entropy", "perplexity"] },
   transcription: { labelled: ["wer", "cer"], unlabelled: null },
 };
 export function defaultMetrics(task: TaskType, labelled: boolean): MetricName[] {
